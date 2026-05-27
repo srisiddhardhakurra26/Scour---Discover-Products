@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db'
 import { formatPrice } from '@/lib/format'
 import { Sparkline } from './Sparkline'
+import { CardRail } from './CardRail'
 
 export async function ClusteredProductsSection({ query }: { query: string }) {
   const products = await prisma.product.findMany({
@@ -44,11 +45,13 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
           {products.length} cluster{products.length === 1 ? '' : 's'} · {totalListings} listings
         </span>
       </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <CardRail itemMinWidth={360} scrollByCount={2}>
         {products.map((p) => (
-          <ProductCard key={p.id} product={p} />
+          <div key={p.id} className="w-[360px] shrink-0 snap-start">
+            <ProductCard product={p} />
+          </div>
         ))}
-      </div>
+      </CardRail>
     </section>
   )
 }

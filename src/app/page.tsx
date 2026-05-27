@@ -1,8 +1,10 @@
+import { Suspense } from 'react'
 import Link from 'next/link'
 import { prisma } from '@/lib/db'
 import { SearchBar } from '@/components/SearchBar'
 import { Header } from '@/components/Header'
 import { BrandMark } from '@/components/Brand'
+import { FeaturedClusters } from '@/components/FeaturedClusters'
 import { getAdapters } from '@/lib/adapters/registry'
 
 const TYPE_BADGE: Record<string, string> = {
@@ -37,7 +39,7 @@ export default async function Home() {
   return (
     <>
       <Header />
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-16 px-6 py-16 sm:py-24">
+      <main className="mx-auto flex w-full max-w-6xl flex-col gap-14 px-6 py-12 sm:py-20">
         {/* Hero */}
         <section className="flex flex-col items-center gap-8 text-center">
           <div className="flex flex-col items-center gap-4">
@@ -70,6 +72,11 @@ export default async function Home() {
             ))}
           </div>
         </section>
+
+        {/* Featured clusters — the actual "shopping happens here" rail */}
+        <Suspense fallback={null}>
+          <FeaturedClusters />
+        </Suspense>
 
         {/* Stats */}
         <section className="grid grid-cols-3 gap-px overflow-hidden rounded-2xl border border-border bg-border">

@@ -45,9 +45,11 @@ export function SearchBar({
         autoFocus={size === 'lg'}
         className={`w-full rounded-xl border border-border-strong bg-bg-card pl-12 pr-24 ${sizeCls} font-medium text-fg outline-none transition-all placeholder:font-normal placeholder:text-fg-subtle focus:border-accent focus:ring-2 focus:ring-accent-ring`}
       />
-      <kbd className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 rounded border border-border bg-bg px-2 py-[3px] font-mono text-[10px] font-medium text-fg-subtle">
-        ↵
-      </kbd>
+      <div className="pointer-events-none absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-1 text-fg-subtle group-focus-within:opacity-0 transition-opacity">
+        <kbd className="rounded border border-border bg-bg px-1.5 py-[2px] font-mono text-[10px] font-medium">
+          ⌘K
+        </kbd>
+      </div>
     </form>
   )
 }

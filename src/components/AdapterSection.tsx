@@ -3,6 +3,7 @@ import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance } from '@/lib/relevance'
 import { ListingCard } from './ListingCard'
+import { CardRail } from './CardRail'
 
 export async function AdapterSection({
   adapter,
@@ -43,15 +44,16 @@ export async function AdapterSection({
     return (
       <section className="flex flex-col gap-4">
         <SectionHeader label={adapter.label} type={adapter.type} status={status} />
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+        <CardRail itemMinWidth={210}>
           {ranked.kept.map(({ listing }) => (
-            <ListingCard
+            <div
               key={`${adapter.id}-${listing.externalId}`}
-              listing={listing}
-              retailerLabel={adapter.label}
-            />
+              className="w-[210px] shrink-0 snap-start"
+            >
+              <ListingCard listing={listing} retailerLabel={adapter.label} />
+            </div>
           ))}
-        </div>
+        </CardRail>
       </section>
     )
   } catch (err) {
@@ -66,11 +68,11 @@ export function AdapterLoading({ adapter }: { adapter: Adapter }) {
   return (
     <section className="flex flex-col gap-4">
       <SectionHeader label={adapter.label} type={adapter.type} status="searching…" />
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
+      <div className="flex gap-3 overflow-hidden pb-1">
+        {Array.from({ length: 5 }).map((_, i) => (
           <div
             key={i}
-            className="aspect-[3/4] animate-pulse rounded-xl border border-border bg-bg-card"
+            className="aspect-[3/4] w-[210px] shrink-0 animate-pulse rounded-xl border border-border bg-bg-card"
           />
         ))}
       </div>

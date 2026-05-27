@@ -1,13 +1,30 @@
 import type { NormalizedListing } from '@/lib/adapters/types'
 import { formatPrice } from '@/lib/format'
 
+const TYPE_DOT: Record<string, string> = {
+  shopify: 'bg-emerald-400',
+  woocommerce: 'bg-violet-400',
+  reddit: 'bg-orange-400',
+  rss: 'bg-amber-400',
+  ebay: 'bg-blue-400',
+  etsy: 'bg-pink-400',
+  bestbuy: 'bg-yellow-400',
+  mock: 'bg-fg-subtle',
+}
+
 export function ListingCard({
   listing,
   retailerLabel,
+  retailerType,
+  showRetailerBadge = false,
 }: {
   listing: NormalizedListing
   retailerLabel?: string
+  retailerType?: string
+  showRetailerBadge?: boolean
 }) {
+  const dotCls = retailerType ? TYPE_DOT[retailerType] ?? TYPE_DOT.mock : TYPE_DOT.mock
+
   return (
     <a
       href={listing.url}
@@ -29,9 +46,17 @@ export function ListingCard({
             no image
           </div>
         )}
-        <div className="absolute right-2 top-2 rounded-md bg-bg/85 px-2 py-1 font-mono text-[12px] font-bold text-accent-strong backdrop-blur-sm">
+        {/* Price chip */}
+        <div className="absolute right-2 top-2 rounded-md bg-bg/85 px-2 py-1 font-mono text-[12px] font-bold text-accent-strong shadow-sm backdrop-blur-md">
           {formatPrice(listing.priceMinor, listing.currency)}
         </div>
+        {/* Retailer badge (unified-view only) */}
+        {showRetailerBadge && retailerLabel && (
+          <div className="absolute left-2 top-2 flex items-center gap-1.5 rounded-md bg-bg/85 px-1.5 py-1 text-[10px] font-medium text-fg shadow-sm backdrop-blur-md">
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotCls}`} />
+            <span className="max-w-[110px] truncate">{retailerLabel}</span>
+          </div>
+        )}
       </div>
       <div className="flex flex-col gap-1 p-3">
         <div className="line-clamp-2 min-h-[2.5em] text-[13px] leading-tight text-fg">

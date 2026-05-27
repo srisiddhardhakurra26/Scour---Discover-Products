@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+@theme {
+  /* Surface colors */
+  --color-bg: oklch(0.14 0.005 270);
+  --color-bg-elevated: oklch(0.18 0.005 270);
+  --color-bg-card: oklch(0.16 0.005 270);
+  --color-bg-hover: oklch(0.21 0.005 270);
+
+  /* Borders */
+  --color-border: oklch(0.24 0.005 270);
+  --color-border-strong: oklch(0.32 0.005 270);
+  --color-border-accent: oklch(0.78 0.16 70 / 0.4);
+
+  /* Foreground */
+  --color-fg: oklch(0.97 0.005 270);
+  --color-fg-muted: oklch(0.68 0.01 270);
+  --color-fg-subtle: oklch(0.52 0.01 270);
+
+  /* Accent — deal hunter amber */
+  --color-accent: oklch(0.82 0.15 75);
+  --color-accent-strong: oklch(0.88 0.17 78);
+  --color-accent-soft: oklch(0.82 0.15 75 / 0.12);
+  --color-accent-ring: oklch(0.82 0.15 75 / 0.35);
+
+  /* Semantic */
+  --color-success: oklch(0.78 0.16 150);
+  --color-danger: oklch(0.68 0.21 25);
+  --color-warn: oklch(0.82 0.16 90);
+
+  /* Fonts (variables injected via next/font in layout.tsx) */
+  --font-sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-space-mono), ui-monospace, monospace;
+
+  /* Radii */
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+}
+
+html, body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "ss02", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+/* Subtle scrollbar in dark theme */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 5px;
+  border: 2px solid var(--color-bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-fg-subtle); }
+
+/* Subtle background grain for depth */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle at 20% 0%, oklch(0.82 0.15 75 / 0.04), transparent 50%),
+    radial-gradient(circle at 80% 100%, oklch(0.60 0.15 280 / 0.03), transparent 50%);
+  z-index: 0;
+}
+
+main, header, footer { position: relative; z-index: 1; }
+
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}

@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Retailer {
+  id            String    @id @default(cuid())
+  type          String
+  identifier    String
+  label         String?
+  config        String?
+  enabled       Boolean   @default(true)
+  lastFetchedAt DateTime?
+  lastError     String?
+  listings      Listing[]
+
+  @@unique([type, identifier])
+}
+
+model Listing {
+  id             String             @id @default(cuid())
+  retailerId     String
+  externalId     String
+  title          String
+  url            String
+  imageUrl       String?
+  priceMinor     Int
+  currency       String
+  shippingMinor  Int?
+  availability   String?
+  sellerName     String?
+  sellerRating   Float?
+  reviewCount    Int?
+  reviewAvg      Float?
+  raw            String?
+  textEmbedding  Bytes?
+  imageEmbedding Bytes?
+  productId      String?
+  capturedAt     DateTime           @default(now())
+  retailer       Retailer           @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+  product        Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+  prices         PriceObservation[]
+
+  @@unique([retailerId, externalId])
+  @@index([productId])
+  @@index([capturedAt])
+}
+
+model Product {
+  id             String    @id @default(cuid())
+  canonicalTitle String
+  canonicalImage String?
+  category       String?
+  brand          String?
+  firstSeenAt    DateTime
+  lastSeenAt     DateTime
+  listingCount   Int       @default(0)
+  retailerCount  Int       @default(0)
+  listings       Listing[]
+
+  @@index([category])
+  @@index([lastSeenAt])
+}
+
+model PriceObservation {
+  id         String   @id @default(cuid())
+  listingId  String
+  priceMinor Int
+  currency   String
+  capturedAt DateTime @default(now())
+  listing    Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, capturedAt])
+}
+
+model SavedProduct {
+  id              String   @id @default(cuid())
+  productId       String
+  alertBelowMinor Int?
+  notes           String?
+  createdAt       DateTime @default(now())
+}

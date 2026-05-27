@@ -1,5 +1,6 @@
 import type { NormalizedListing } from './adapters/types'
 import { dotProduct, embedQueryCached, embedTexts } from './embeddings'
+import { normalizeTitle } from './text'
 
 // Threshold for cosine similarity between query embedding and listing-title embedding.
 // Tuned empirically for all-MiniLM-L6-v2:
@@ -27,7 +28,7 @@ export async function rankByRelevance(
   if (listings.length === 0) return { kept: [], dropped: 0 }
   if (!query.trim()) {
     // No query → don't rank, just embed for persistence.
-    const vectors = await embedTexts(listings.map((l) => l.title))
+    const vectors = await embedTexts(listings.map((l) => normalizeTitle(l.title)))
     return {
       kept: listings.map((listing, i) => ({ listing, embedding: vectors[i], score: 1 })),
       dropped: 0,
@@ -36,7 +37,7 @@ export async function rankByRelevance(
 
   const [queryVec, titleVecs] = await Promise.all([
     embedQueryCached(query),
-    embedTexts(listings.map((l) => l.title)),
+    embedTexts(listings.map((l) => normalizeTitle(l.title))),
   ])
 
   const scored: RankedListing[] = listings.map((listing, i) => ({

@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db'
 import type { NormalizedListing } from './adapters/types'
 import { embedTexts, floatToBytes } from './embeddings'
 import { clusterListing } from './cluster'
+import { normalizeTitle } from './text'
 
 export type PersistResult = {
   upserts: number
@@ -91,7 +92,9 @@ export async function persistListings(
       if (precomputedEmbeddings) {
         vectors = targets.map((t) => precomputedEmbeddings[t.index])
       } else {
-        vectors = await embedTexts(targets.map((t) => listings[t.index].title))
+        vectors = await embedTexts(
+          targets.map((t) => normalizeTitle(listings[t.index].title)),
+        )
       }
       for (let j = 0; j < targets.length; j++) {
         const { listingId } = targets[j]

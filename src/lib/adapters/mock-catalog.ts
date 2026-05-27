@@ -81,8 +81,20 @@ function tokenize(s: string): string[] {
 export function findCatalog(query: string): CatalogProduct[] {
   const tokens = tokenize(query)
   if (tokens.length === 0) return []
+
+  // Pass 1: category key match (fast path)
+  // "earbuds", "cocoa", "tv" etc match their categories directly
   for (const [key, items] of Object.entries(CATALOG)) {
     if (tokens.some((t) => t.includes(key) || key.includes(t))) return items
   }
+
+  // Pass 2: product-name token match
+  // Catches things like "airpods" → earbuds (Apple AirPods Pro in that category),
+  // "macbook" → laptop, "ghirardelli" → cocoa, "lavazza" → coffee.
+  for (const items of Object.values(CATALOG)) {
+    const nameTokens = new Set(items.flatMap((it) => tokenize(it.name)))
+    if (tokens.some((t) => nameTokens.has(t))) return items
+  }
+
   return []
 }

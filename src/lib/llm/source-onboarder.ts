@@ -1,4 +1,5 @@
 import { generateJson } from './client'
+import { looksLikeJsShell, renderPage } from '@/lib/browser'
 
 export type GenericHtmlConfig = {
   /** Template with literal `{query}` to interpolate the user's search. */
@@ -19,6 +20,8 @@ export type GenericHtmlConfig = {
   currency?: string
   /** Brand inferred from the storefront (used as default sellerName). */
   brandName?: string
+  /** True when the site only renders products after running JavaScript. */
+  requiresJs?: boolean
 }
 
 const REALISTIC_UA =
@@ -46,17 +49,29 @@ Rules:
 - If you can't tell, GUESS based on the platform (Shopify often has /search?q=, WooCommerce has /?s=).
 - Do not return any text outside the JSON object.`
 
-async function fetchHomepage(domain: string): Promise<string> {
-  const res = await fetch(`https://${domain}/`, {
-    signal: AbortSignal.timeout(8000),
-    headers: {
-      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'accept-language': 'en-US,en;q=0.9',
-      'user-agent': REALISTIC_UA,
-    },
-  })
-  if (!res.ok) throw new Error(`homepage HTTP ${res.status}`)
-  return res.text()
+async function fetchHomepage(
+  domain: string,
+): Promise<{ html: string; requiresJs: boolean }> {
+  // Try plain fetch first — fast for server-rendered sites.
+  try {
+    const res = await fetch(`https://${domain}/`, {
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': REALISTIC_UA,
+      },
+    })
+    if (res.ok) {
+      const html = await res.text()
+      if (!looksLikeJsShell(html)) return { html, requiresJs: false }
+    }
+  } catch {
+    // fall through to Playwright
+  }
+  // JS-heavy site (or fetch got blocked) — render with Chromium.
+  const rendered = await renderPage(`https://${domain}/`, 20_000)
+  return { html: rendered.html, requiresJs: true }
 }
 
 function truncate(html: string, max = 24000): string {
@@ -103,6 +118,7 @@ function validate(raw: unknown): GenericHtmlConfig | null {
   if (typeof obj.brandName === 'string' && obj.brandName.trim()) {
     cfg.brandName = obj.brandName.trim()
   }
+  if (obj.requiresJs === true) cfg.requiresJs = true
   return cfg
 }
 
@@ -111,9 +127,9 @@ function validate(raw: unknown): GenericHtmlConfig | null {
  * Returns null if the LLM can't produce a valid config or the fetch fails.
  */
 export async function onboardSource(domain: string): Promise<GenericHtmlConfig | null> {
-  let html: string
+  let page: { html: string; requiresJs: boolean }
   try {
-    html = await fetchHomepage(domain)
+    page = await fetchHomepage(domain)
   } catch (err) {
     console.error('[source-onboarder] homepage fetch:', err)
     return null
@@ -124,7 +140,7 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
     json = await generateJson(
       {
         system: SYSTEM,
-        user: `Domain: ${domain}\n\nHomepage HTML (truncated):\n${truncate(html)}`,
+        user: `Domain: ${domain}\n\nHomepage HTML (truncated):\n${truncate(page.html)}`,
         tier: 'reasoning',
         maxTokens: 800,
       },
@@ -136,7 +152,10 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
   }
 
   try {
-    return validate(JSON.parse(json))
+    const cfg = validate(JSON.parse(json))
+    if (!cfg) return null
+    if (page.requiresJs) cfg.requiresJs = true
+    return cfg
   } catch (err) {
     console.error('[source-onboarder] parse:', err)
     return null

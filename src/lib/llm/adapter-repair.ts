@@ -1,15 +1,14 @@
 import { generateJson } from './client'
 import type { GenericHtmlConfig } from './source-onboarder'
-
-const REALISTIC_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
+import { renderPage } from '@/lib/browser'
 
 const SYSTEM = `You repair a broken e-commerce scraper config.
 
 You are given:
 - The storefront's domain
 - The current GenericHtmlConfig (which produced 0 results)
-- The HTML of the search results page for a sample query
+- The HTML of the homepage (always)
+- The HTML of the search results page for a sample query (status may be 4xx if the template is wrong)
 
 Return a corrected JSON object with the same schema:
   searchUrlTemplate: string  // must include literal "{query}"
@@ -23,28 +22,27 @@ Return a corrected JSON object with the same schema:
   brandName: string?
 
 Rules:
-- Only change selectors that look wrong against the HTML. Keep working ones identical.
+- If the search HTTP status is 4xx/5xx, the searchUrlTemplate is wrong. Look at <form> elements in the homepage HTML (action= and input name=) to find the real search endpoint. E.g. nike.com uses /w?q={query}, amazon uses /s?k={query}.
 - Use stable class-based selectors a CSS engine (cheerio) can run.
-- If the searchUrlTemplate produces a non-search page in the HTML, propose a corrected URL.
+- Only change selectors that look wrong; keep working ones identical.
 - Output ONLY the JSON object — no commentary.`
 
-async function fetchSearchPage(
+async function renderRepairPages(
   domain: string,
   searchUrlTemplate: string,
   query: string,
-): Promise<{ status: number; html: string }> {
-  const url = searchUrlTemplate.replace('{query}', encodeURIComponent(query))
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(10_000),
-    headers: {
-      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'accept-language': 'en-US,en;q=0.9',
-      'user-agent': REALISTIC_UA,
-      referer: `https://${domain}/`,
-    },
-  })
-  const html = await res.text().catch(() => '')
-  return { status: res.status, html }
+): Promise<{ homepage: string; search: { status: number; html: string } }> {
+  // Always use Playwright for repair — handles JS-heavy sites and serves
+  // identical content regardless of bot fingerprinting heuristics that vary
+  // between fetch and a real browser.
+  const homepage = await renderPage(`https://${domain}/`, 20_000)
+  const searchUrl = searchUrlTemplate.replace('{query}', encodeURIComponent(query))
+  const search = await renderPage(searchUrl, 25_000).catch((err) => ({
+    status: 0,
+    html: `<!-- render error: ${err instanceof Error ? err.message : String(err)} -->`,
+    jsRendered: true,
+  }))
+  return { homepage: homepage.html, search: { status: search.status, html: search.html } }
 }
 
 function truncate(html: string, max = 24000): string {
@@ -87,6 +85,7 @@ function validate(raw: unknown): GenericHtmlConfig | null {
   if (typeof obj.brandName === 'string' && obj.brandName.trim()) {
     cfg.brandName = obj.brandName.trim()
   }
+  if (obj.requiresJs === true) cfg.requiresJs = true
   return cfg
 }
 
@@ -100,11 +99,11 @@ export async function repairGenericAdapter(
   config: GenericHtmlConfig,
   sampleQuery: string,
 ): Promise<GenericHtmlConfig | null> {
-  let page: { status: number; html: string }
+  let pages: { homepage: string; search: { status: number; html: string } }
   try {
-    page = await fetchSearchPage(domain, config.searchUrlTemplate, sampleQuery)
+    pages = await renderRepairPages(domain, config.searchUrlTemplate, sampleQuery)
   } catch (err) {
-    console.error('[adapter-repair] fetch:', err)
+    console.error('[adapter-repair] render:', err)
     return null
   }
 
@@ -116,13 +115,14 @@ export async function repairGenericAdapter(
         user:
           `Domain: ${domain}\n` +
           `Sample query: ${sampleQuery}\n` +
-          `HTTP status: ${page.status}\n` +
+          `Search HTTP status: ${pages.search.status}\n` +
           `Current config:\n${JSON.stringify(config, null, 2)}\n\n` +
-          `Search results HTML (truncated):\n${truncate(page.html)}`,
+          `--- HOMEPAGE HTML (truncated) ---\n${truncate(pages.homepage, 12000)}\n\n` +
+          `--- SEARCH RESULTS HTML (truncated) ---\n${truncate(pages.search.html, 14000)}`,
         tier: 'reasoning',
         maxTokens: 800,
       },
-      AbortSignal.timeout(25_000),
+      AbortSignal.timeout(40_000),
     )
   } catch (err) {
     console.error('[adapter-repair] llm:', err)
@@ -130,7 +130,11 @@ export async function repairGenericAdapter(
   }
 
   try {
-    return validate(JSON.parse(json))
+    const fixed = validate(JSON.parse(json))
+    if (!fixed) return null
+    // Repair always runs Playwright, so the new config is JS-rendered too.
+    fixed.requiresJs = true
+    return fixed
   } catch (err) {
     console.error('[adapter-repair] parse:', err)
     return null

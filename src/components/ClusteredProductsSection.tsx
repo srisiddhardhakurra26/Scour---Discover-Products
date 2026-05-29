@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db'
 import { formatPrice } from '@/lib/format'
 import { bytesToFloat, dotProduct, embedQueryCached, EMBEDDING_DIM } from '@/lib/embeddings'
+import { parseQuery } from '@/lib/llm/query-parser'
 import { Sparkline } from './Sparkline'
 import { CardRail } from './CardRail'
 
@@ -54,10 +55,13 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
   if (products.length === 0) return null
 
   // Rank clusters by max cosine similarity between query embedding and any
-  // listing's title embedding inside the cluster. Drop low-scorers.
+  // listing's title embedding inside the cluster. Drop low-scorers and
+  // anything whose entire price band falls outside the LLM-parsed budget.
   let ranked = products.map((p) => ({ product: p, score: 0 }))
   if (query.trim()) {
-    const queryVec = await embedQueryCached(query)
+    const parsed = await parseQuery(query)
+    const matchQuery = parsed.refinedQuery || query
+    const queryVec = await embedQueryCached(matchQuery)
     ranked = products
       .map((p) => {
         let best = 0
@@ -73,7 +77,21 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
       .filter((r) => {
         if (r.score < CLUSTER_RELEVANCE_FLOOR) return false
         const titles = [r.product.canonicalTitle, ...r.product.listings.map((l) => l.title)]
-        return clusterHasTokenOverlap(query, titles)
+        if (!clusterHasTokenOverlap(matchQuery, titles)) return false
+        // Drop the cluster if every priced listing is outside the user's
+        // budget — same idea as the per-listing filter but at cluster level.
+        if (parsed.maxPriceMinor !== undefined || parsed.minPriceMinor !== undefined) {
+          const priced = r.product.listings.filter((l) => l.priceMinor > 0)
+          if (priced.length > 0) {
+            const anyInside = priced.some((l) => {
+              if (parsed.maxPriceMinor !== undefined && l.priceMinor > parsed.maxPriceMinor) return false
+              if (parsed.minPriceMinor !== undefined && l.priceMinor < parsed.minPriceMinor) return false
+              return true
+            })
+            if (!anyInside) return false
+          }
+        }
+        return true
       })
       .sort((a, b) => b.score - a.score)
   }

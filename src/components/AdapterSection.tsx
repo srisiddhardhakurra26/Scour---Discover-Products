@@ -2,6 +2,7 @@ import { after } from 'next/server'
 import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance } from '@/lib/relevance'
+import { parseQuery } from '@/lib/llm/query-parser'
 import { ListingCard } from './ListingCard'
 import { CardRail } from './CardRail'
 
@@ -16,10 +17,12 @@ export async function AdapterSection({
 }) {
   const started = performance.now()
   try {
-    const rawListings = await adapter.search(query, AbortSignal.timeout(timeoutMs))
+    const parsed = await parseQuery(query)
+    const searchQuery = parsed.refinedQuery || query
+    const rawListings = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
     if (rawListings.length === 0) return null
 
-    const ranked = await rankByRelevance(query, rawListings)
+    const ranked = await rankByRelevance(query, rawListings, parsed)
     const elapsedMs = Math.round(performance.now() - started)
 
     after(async () => {

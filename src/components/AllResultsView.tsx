@@ -2,6 +2,7 @@ import { after } from 'next/server'
 import type { Adapter, NormalizedListing } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance, type RankedListing } from '@/lib/relevance'
+import { parseQuery } from '@/lib/llm/query-parser'
 import { formatPrice } from '@/lib/format'
 import { ListingCard } from './ListingCard'
 import type { SortKey } from './SearchToolbar'
@@ -19,12 +20,15 @@ export async function AllResultsView({
   adapters: Adapter[]
   timeoutMs: number
 }) {
+  const parsed = await parseQuery(query)
+  const searchQuery = parsed.refinedQuery || query
+
   // Fan out in parallel, persist via after() so DB writes don't block.
   const results = await Promise.all(
     adapters.map(async (adapter) => {
       try {
-        const raw = await adapter.search(query, AbortSignal.timeout(timeoutMs))
-        const ranked = await rankByRelevance(query, raw)
+        const raw = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
+        const ranked = await rankByRelevance(query, raw, parsed)
         after(async () => {
           try {
             await persistListings(

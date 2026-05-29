@@ -1,5 +1,6 @@
 import type { NormalizedListing } from './adapters/types'
 import { dotProduct, embedQueryCached, embedTexts } from './embeddings'
+import type { ParsedQuery } from './llm/query-parser'
 import { normalizeTitle } from './text'
 
 // Threshold scales with query length. Short generic queries ("shoes") produce
@@ -50,12 +51,25 @@ export type RankResult = {
   dropped: number
 }
 
+function withinPriceWindow(priceMinor: number, parsed?: ParsedQuery): boolean {
+  if (!parsed) return true
+  if (priceMinor <= 0) return true // no price extracted; don't drop
+  if (parsed.maxPriceMinor !== undefined && priceMinor > parsed.maxPriceMinor) return false
+  if (parsed.minPriceMinor !== undefined && priceMinor < parsed.minPriceMinor) return false
+  return true
+}
+
 export async function rankByRelevance(
   query: string,
   listings: NormalizedListing[],
+  parsed?: ParsedQuery,
 ): Promise<RankResult> {
   if (listings.length === 0) return { kept: [], dropped: 0 }
-  if (!query.trim()) {
+  // Use the LLM-refined query for semantic + token matching when available
+  // — strips price phrases ("under $80") and other filter noise that would
+  // otherwise pollute the embedding.
+  const matchQuery = parsed?.refinedQuery?.trim() || query
+  if (!matchQuery.trim()) {
     const vectors = await embedTexts(listings.map((l) => normalizeTitle(l.title)))
     return {
       kept: listings.map((listing, i) => ({ listing, embedding: vectors[i], score: 1 })),
@@ -64,11 +78,11 @@ export async function rankByRelevance(
   }
 
   const [queryVec, titleVecs] = await Promise.all([
-    embedQueryCached(query),
+    embedQueryCached(matchQuery),
     embedTexts(listings.map((l) => normalizeTitle(l.title))),
   ])
 
-  const { floor, trust } = thresholdFor(query)
+  const { floor, trust } = thresholdFor(matchQuery)
 
   const scored: RankedListing[] = listings.map((listing, i) => ({
     listing,
@@ -78,9 +92,10 @@ export async function rankByRelevance(
 
   const kept = scored
     .filter((s) => {
+      if (!withinPriceWindow(s.listing.priceMinor, parsed)) return false
       if (s.score < floor) return false
       if (s.score >= trust) return true
-      return hasTokenOverlap(query, s.listing.title)
+      return hasTokenOverlap(matchQuery, s.listing.title)
     })
     .sort((a, b) => b.score - a.score)
 

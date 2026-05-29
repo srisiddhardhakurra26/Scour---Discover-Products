@@ -2,6 +2,9 @@
 
 import { revalidatePath } from 'next/cache'
 import { prisma } from '@/lib/db'
+import { onboardSource } from '@/lib/llm/source-onboarder'
+import { repairGenericAdapter } from '@/lib/llm/adapter-repair'
+import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
 
 const REALISTIC_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
@@ -90,19 +93,49 @@ export async function addStoreRetailer(
   if (!domain) return { error: 'Enter a valid domain (e.g. allbirds.com).' }
 
   const detect = await detectStoreType(domain)
-  if (!detect.ok) return { error: detect.message }
+
+  if (detect.ok) {
+    const existing = await prisma.retailer.findUnique({
+      where: { type_identifier: { type: detect.type, identifier: domain } },
+    })
+    if (existing) return { error: `${domain} is already added (${detect.type}).` }
+
+    await prisma.retailer.create({
+      data: {
+        type: detect.type,
+        identifier: domain,
+        label: labelRaw || domain.replace(/^www\./, ''),
+        enabled: true,
+      },
+    })
+
+    revalidatePath('/sources')
+    revalidatePath('/')
+    return { ok: true }
+  }
+
+  // Fast paths failed → let the onboarder agent inspect the homepage and
+  // generate a generic-html config. Slower (one LLM call + one fetch), so
+  // the form's "Checking…" state can sit here for a few seconds.
+  const config = await onboardSource(domain)
+  if (!config) {
+    return {
+      error: `${detect.message} (agent couldn't infer a scraper config either)`,
+    }
+  }
 
   const existing = await prisma.retailer.findUnique({
-    where: { type_identifier: { type: detect.type, identifier: domain } },
+    where: { type_identifier: { type: 'generic-html', identifier: domain } },
   })
-  if (existing) return { error: `${domain} is already added (${detect.type}).` }
+  if (existing) return { error: `${domain} is already added (generic-html).` }
 
   await prisma.retailer.create({
     data: {
-      type: detect.type,
+      type: 'generic-html',
       identifier: domain,
-      label: labelRaw || domain.replace(/^www\./, ''),
+      label: labelRaw || config.brandName || domain.replace(/^www\./, ''),
       enabled: true,
+      config: JSON.stringify(config),
     },
   })
 
@@ -121,4 +154,36 @@ export async function removeRetailer(id: string) {
   await prisma.retailer.delete({ where: { id } })
   revalidatePath('/sources')
   revalidatePath('/')
+}
+
+export async function repairRetailer(
+  id: string,
+  sampleQuery: string,
+): Promise<{ ok?: boolean; error?: string }> {
+  const trimmedQuery = sampleQuery.trim()
+  if (!trimmedQuery) return { error: 'Provide a sample search query to test against.' }
+
+  const retailer = await prisma.retailer.findUnique({ where: { id } })
+  if (!retailer) return { error: 'Retailer not found.' }
+  if (retailer.type !== 'generic-html' || !retailer.config) {
+    return { error: 'Only agent-onboarded storefronts can be auto-repaired.' }
+  }
+
+  let config: GenericHtmlConfig
+  try {
+    config = JSON.parse(retailer.config) as GenericHtmlConfig
+  } catch {
+    return { error: 'Stored config is corrupted; remove and re-add the source.' }
+  }
+
+  const fixed = await repairGenericAdapter(retailer.identifier, config, trimmedQuery)
+  if (!fixed) return { error: 'Agent could not infer a fix from the search page.' }
+
+  await prisma.retailer.update({
+    where: { id },
+    data: { config: JSON.stringify(fixed), lastError: null },
+  })
+  revalidatePath('/sources')
+  revalidatePath('/')
+  return { ok: true }
 }

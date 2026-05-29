@@ -11,6 +11,8 @@ import { createEbayAdapter } from './ebay'
 import { createEtsyAdapter } from './etsy'
 import { createBestBuyAdapter } from './bestbuy'
 import { createAmazonAdapter } from './amazon'
+import { createGenericHtmlAdapter } from './generic-html'
+import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
 
 export const ADAPTER_TIMEOUT_MS = 4000
 
@@ -40,6 +42,14 @@ function buildAdapter(r: Retailer): Adapter | null {
   }
   if (r.type === 'amazon' && r.identifier === 'amazon') {
     return createAmazonAdapter(r.id, label)
+  }
+  if (r.type === 'generic-html' && r.config) {
+    try {
+      const config = JSON.parse(r.config) as GenericHtmlConfig
+      return createGenericHtmlAdapter(r.id, label, r.identifier, config)
+    } catch {
+      return null
+    }
   }
   if (r.type === 'mock' && r.identifier === 'mock-ebay') {
     return createMockEbayAdapter(r.id, label)

@@ -3,16 +3,29 @@ import { Header } from '@/components/Header'
 import { AddSourceForm } from './AddSourceForm'
 import { RetailerRow } from './RetailerRow'
 
-const TYPE_ORDER = ['shopify', 'woocommerce', 'reddit', 'rss', 'ebay', 'etsy', 'bestbuy', 'mock']
+const TYPE_ORDER = [
+  'shopify',
+  'woocommerce',
+  'generic-html',
+  'reddit',
+  'rss',
+  'ebay',
+  'etsy',
+  'bestbuy',
+  'amazon',
+  'mock',
+]
 
 const TYPE_LABEL: Record<string, string> = {
   shopify: 'Shopify storefronts',
   woocommerce: 'WooCommerce storefronts',
+  'generic-html': 'Agent-onboarded storefronts',
   reddit: 'Reddit communities',
   rss: 'RSS feeds',
   ebay: 'eBay',
   etsy: 'Etsy',
   bestbuy: 'Best Buy',
+  amazon: 'Amazon',
   mock: 'Mock sources (testing)',
 }
 

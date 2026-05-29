@@ -34,9 +34,9 @@ export function AddSourceForm() {
         </button>
       </div>
       <p className="font-mono text-[11px] text-fg-subtle">
-        Scour auto-detects Shopify (<code>/products.json</code>) and WooCommerce
-        (<code>/wp-json/wc/store/v1/products</code>). Cloudflare-protected storefronts will
-        be rejected.
+        Auto-detects Shopify (<code>/products.json</code>) and WooCommerce
+        (<code>/wp-json/wc/store/v1/products</code>). For anything else, an LLM agent
+        inspects the homepage and infers a scraper config. May take a few seconds.
       </p>
       {state?.error && (
         <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">

@@ -2,9 +2,10 @@ import { prisma } from '@/lib/db'
 import { bytesToFloat, dotProduct, EMBEDDING_DIM } from './embeddings'
 import { extractASIN } from './text'
 
-// Bumped from 0.75 → 0.82 to reduce over-clustering. Combined with
-// title normalization (the embeddings now reflect product essence rather than
-// promo copy), this gives meaningfully tighter clusters.
+// Bumped from 0.75 → 0.82 to reduce over-clustering. Combined with title
+// normalization (embeddings reflect product essence rather than promo copy)
+// and the price guardrail below, this gives meaningfully tighter clusters
+// without starving the rail of multi-retailer matches.
 export const SIMILARITY_THRESHOLD = 0.82
 
 // Reject attaching a listing to a cluster if its price is wildly outside the

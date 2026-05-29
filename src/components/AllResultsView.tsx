@@ -90,14 +90,20 @@ export async function AllResultsView({
 }
 
 function BestDealCallout({ listings }: { listings: TaggedListing[] }) {
-  const cheapest = listings
-    .filter((l) => l.listing.priceMinor > 0)
-    .sort((a, b) => a.listing.priceMinor - b.listing.priceMinor)[0]
-  if (!cheapest) return null
+  // Pick cheapest among the top-relevant pool, not absolute cheapest of
+  // everything. Otherwise a low-scoring $3 accessory wins "lowest price".
+  const priced = listings.filter((l) => l.listing.priceMinor > 0)
+  if (priced.length === 0) return null
+  const topRelevant = [...priced].sort((a, b) => b.score - a.score).slice(0, 10)
+  // Require the top item to actually be a confident match — otherwise hide
+  // the callout entirely rather than crowning a marginal result.
+  if (topRelevant[0].score < 0.4) return null
 
-  const others = listings
-    .filter((l) => l.listing.priceMinor > 0 && l !== cheapest)
-    .slice(0, 5)
+  const cheapest = [...topRelevant].sort(
+    (a, b) => a.listing.priceMinor - b.listing.priceMinor,
+  )[0]
+
+  const others = topRelevant.filter((l) => l !== cheapest).slice(0, 5)
   const median =
     others.length > 0
       ? others.map((l) => l.listing.priceMinor).sort((a, b) => a - b)[Math.floor(others.length / 2)]

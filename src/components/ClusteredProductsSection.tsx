@@ -1,14 +1,39 @@
 import { prisma } from '@/lib/db'
 import { formatPrice } from '@/lib/format'
+import { bytesToFloat, dotProduct, embedQueryCached, EMBEDDING_DIM } from '@/lib/embeddings'
 import { Sparkline } from './Sparkline'
 import { CardRail } from './CardRail'
 
+// Clusters whose best listing scores below this against the query are dropped.
+// Lower than the per-listing floor: a cluster having multiple retailers is
+// already a quality signal, so we can be a bit more permissive on relevance.
+const CLUSTER_RELEVANCE_FLOOR = 0.25
+
+function tokenMatchesTitle(token: string, titleLower: string): boolean {
+  if (titleLower.includes(token)) return true
+  if (token.endsWith('s') && token.length > 3 && titleLower.includes(token.slice(0, -1))) {
+    return true
+  }
+  return false
+}
+
+// Multi-word queries must have *every* meaningful token appear in at least
+// one listing in the cluster. Single-word queries need at least that one
+// token. Stops "fitbit air" from surfacing AirPods clusters because "air"
+// alone happens to be semantically close.
+function clusterHasTokenOverlap(query: string, titles: string[]): boolean {
+  const qTokens = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length >= 3)
+  if (qTokens.length === 0) return true
+  const lowered = titles.map((t) => t.toLowerCase())
+  return qTokens.every((tok) => lowered.some((title) => tokenMatchesTitle(tok, title)))
+}
+
 export async function ClusteredProductsSection({ query }: { query: string }) {
   const products = await prisma.product.findMany({
-    where: {
-      retailerCount: { gte: 2 },
-      ...(query ? { listings: { some: { title: { contains: query } } } } : {}),
-    },
+    where: { retailerCount: { gte: 2 } },
     include: {
       listings: {
         include: {
@@ -23,12 +48,40 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
       },
     },
     orderBy: { lastSeenAt: 'desc' },
-    take: 12,
+    take: 200,
   })
 
   if (products.length === 0) return null
 
-  const totalListings = products.reduce((acc, p) => acc + p.listings.length, 0)
+  // Rank clusters by max cosine similarity between query embedding and any
+  // listing's title embedding inside the cluster. Drop low-scorers.
+  let ranked = products.map((p) => ({ product: p, score: 0 }))
+  if (query.trim()) {
+    const queryVec = await embedQueryCached(query)
+    ranked = products
+      .map((p) => {
+        let best = 0
+        for (const l of p.listings) {
+          if (!l.textEmbedding) continue
+          const v = bytesToFloat(l.textEmbedding)
+          if (v.length !== EMBEDDING_DIM) continue
+          const s = dotProduct(queryVec, v)
+          if (s > best) best = s
+        }
+        return { product: p, score: best }
+      })
+      .filter((r) => {
+        if (r.score < CLUSTER_RELEVANCE_FLOOR) return false
+        const titles = [r.product.canonicalTitle, ...r.product.listings.map((l) => l.title)]
+        return clusterHasTokenOverlap(query, titles)
+      })
+      .sort((a, b) => b.score - a.score)
+  }
+
+  const visible = ranked.slice(0, 12).map((r) => r.product)
+  if (visible.length === 0) return null
+
+  const totalListings = visible.reduce((acc, p) => acc + p.listings.length, 0)
 
   return (
     <section className="flex flex-col gap-4">
@@ -42,11 +95,11 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
           </span>
         </div>
         <span className="font-mono text-[11px] tabular-nums text-fg-subtle">
-          {products.length} cluster{products.length === 1 ? '' : 's'} · {totalListings} listings
+          {visible.length} cluster{visible.length === 1 ? '' : 's'} · {totalListings} listings
         </span>
       </div>
       <CardRail itemMinWidth={360} scrollByCount={2}>
-        {products.map((p) => (
+        {visible.map((p) => (
           <div key={p.id} className="w-[360px] shrink-0 snap-start">
             <ProductCard product={p} />
           </div>

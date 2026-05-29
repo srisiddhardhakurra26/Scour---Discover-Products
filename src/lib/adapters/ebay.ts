@@ -1,99 +1,172 @@
 import type { Adapter, NormalizedListing } from './types'
 
-type EbayItem = {
-  itemId: string
-  title: string
-  itemWebUrl: string
-  image?: { imageUrl?: string }
-  thumbnailImages?: Array<{ imageUrl?: string }>
-  price?: { value?: string; currency?: string }
-  seller?: { username?: string; feedbackPercentage?: string; feedbackScore?: number }
-  shippingOptions?: Array<{ shippingCost?: { value?: string } }>
-  condition?: string
-}
+// Scrape-based eBay adapter. eBay refuses to serve the search page to a
+// request that doesn't carry session cookies, so we visit the homepage once
+// to harvest cookies, cache them, and reuse them across searches.
 
-type EbaySearchResponse = {
-  itemSummaries?: EbayItem[]
-  warnings?: Array<{ message: string }>
-}
+const USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
 
-type CachedToken = { token: string; expiresAt: number }
-let cachedToken: CachedToken | null = null
+const COOKIE_TTL_MS = 10 * 60 * 1000 // refresh every 10 min
 
-async function getEbayToken(): Promise<string> {
-  const appId = process.env.EBAY_APP_ID
-  const certId = process.env.EBAY_CERT_ID
-  if (!appId || !certId) throw new Error('eBay creds missing')
+type CookieCache = { value: string; expiresAt: number }
+let cookieCache: CookieCache | null = null
 
-  if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) {
-    return cachedToken.token
-  }
-
-  const auth = Buffer.from(`${appId}:${certId}`).toString('base64')
-  const res = await fetch('https://api.ebay.com/identity/v1/oauth2/token', {
-    method: 'POST',
+async function getCookies(signal: AbortSignal): Promise<string> {
+  if (cookieCache && cookieCache.expiresAt > Date.now()) return cookieCache.value
+  const res = await fetch('https://www.ebay.com/', {
+    signal,
     headers: {
-      authorization: `Basic ${auth}`,
-      'content-type': 'application/x-www-form-urlencoded',
+      'user-agent': USER_AGENT,
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'accept-language': 'en-US,en;q=0.9',
     },
-    body: 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope',
   })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`eBay OAuth HTTP ${res.status}: ${text.slice(0, 200)}`)
-  }
-  const data = (await res.json()) as { access_token: string; expires_in: number }
-  cachedToken = {
-    token: data.access_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  }
-  return data.access_token
+  if (!res.ok) throw new Error(`eBay homepage: HTTP ${res.status}`)
+  const setCookies = res.headers.getSetCookie?.() ?? []
+  const value = setCookies.map((c) => c.split(';')[0]).join('; ')
+  cookieCache = { value, expiresAt: Date.now() + COOKIE_TTL_MS }
+  return value
 }
 
-export function createEbayAdapter(id: string, label: string): Adapter | null {
-  if (!process.env.EBAY_APP_ID || !process.env.EBAY_CERT_ID) return null
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+}
 
+function stripTags(s: string): string {
+  return decodeEntities(s.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
+}
+
+type CardStart = { listingId: string; start: number }
+
+function findCardStarts(html: string): CardStart[] {
+  const re = /<li class="s-card[^"]*"[^>]*\bdata-listingid=(?:"|)([0-9]+)/g
+  const starts: CardStart[] = []
+  let m: RegExpExecArray | null
+  const seen = new Set<string>()
+  while ((m = re.exec(html)) !== null) {
+    if (seen.has(m[1])) continue
+    seen.add(m[1])
+    starts.push({ listingId: m[1], start: m.index })
+  }
+  return starts
+}
+
+function parseCard(block: string, listingId: string): NormalizedListing | null {
+  // eBay sometimes renders a "Shop on eBay" placeholder card that has a real
+  // data-listingid but whose href points to a fake /itm/123456 search page.
+  // Require the card's href to reference the same listingId before trusting it.
+  const hrefMatch = block.match(/href=https?:\/\/(?:www\.)?ebay\.com\/itm\/([0-9]+)/)
+  if (!hrefMatch || hrefMatch[1] !== listingId) return null
+
+  const titleMatch =
+    block.match(
+      /<div role=heading[^>]*class=s-card__title[^>]*>\s*<span[^>]*>([^<]+)<\/span>/,
+    ) ??
+    block.match(
+      /<div [^>]*class="s-card__title"[^>]*>\s*<span[^>]*>([^<]+)<\/span>/,
+    )
+  if (!titleMatch) return null
+  const title = stripTags(titleMatch[1])
+  if (!title) return null
+
+  // Price: pick first $-prefixed price in the card block (eBay sometimes shows
+  // "to" ranges; we just take the lower end).
+  const priceMatch = block.match(
+    /<span class="su-styled-text[^"]*s-card__price[^"]*">\s*\$([\d,]+(?:\.\d+)?)/,
+  )
+  const priceMinor = priceMatch
+    ? Math.round(parseFloat(priceMatch[1].replace(/,/g, '')) * 100)
+    : 0
+
+  // Image: <img class=s-card__image ... src="...">
+  const imgMatch =
+    block.match(/<img[^>]*class=s-card__image[^>]*\bsrc=([^\s>]+)/) ??
+    block.match(/<img[^>]*\bsrc=([^\s>]+)[^>]*class=s-card__image/)
+  let imageUrl = imgMatch?.[1]
+  if (imageUrl) imageUrl = imageUrl.replace(/^"|"$/g, '')
+  // eBay sometimes uses a placeholder until intersection-observer swaps it in.
+  // Prefer data-defer-load when src is the placeholder.
+  if (imageUrl?.includes('fxxj3ttftm5ltcqnto1o4baovyl.png')) {
+    const deferMatch = block.match(
+      /<img[^>]*class=s-card__image[^>]*\bdata-defer-load=([^\s>]+)/,
+    )
+    if (deferMatch) imageUrl = deferMatch[1].replace(/^"|"$/g, '')
+  }
+
+  // Condition shows in the subtitle row.
+  const subtitleMatch = block.match(
+    /<div class=s-card__subtitle[^>]*>\s*<span[^>]*>([^<]+)<\/span>/,
+  )
+  const condition = subtitleMatch ? stripTags(subtitleMatch[1]) : undefined
+
+  return {
+    externalId: listingId,
+    title,
+    url: `https://www.ebay.com/itm/${listingId}`,
+    imageUrl,
+    priceMinor,
+    currency: 'USD',
+    sellerName: 'eBay seller',
+    availability: condition?.toLowerCase().includes('new') ? 'in_stock' : undefined,
+  }
+}
+
+function parseSearchHtml(html: string): NormalizedListing[] {
+  const cards = findCardStarts(html)
+  if (cards.length === 0) return []
+  const out: NormalizedListing[] = []
+  for (let i = 0; i < cards.length; i++) {
+    const start = cards[i].start
+    const end = cards[i + 1]?.start ?? Math.min(start + 12000, html.length)
+    const block = html.slice(start, end)
+    const listing = parseCard(block, cards[i].listingId)
+    if (listing) out.push(listing)
+  }
+  return out
+}
+
+export function createEbayAdapter(id: string, label: string): Adapter {
   return {
     id,
     label,
     type: 'ebay',
     async search(query, signal): Promise<NormalizedListing[]> {
-      const token = await getEbayToken()
-      const url = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search')
-      url.searchParams.set('q', query)
-      url.searchParams.set('limit', '10')
+      const cookies = await getCookies(signal)
+
+      const url = new URL('https://www.ebay.com/sch/i.html')
+      url.searchParams.set('_nkw', query)
 
       const res = await fetch(url, {
         signal,
         headers: {
-          authorization: `Bearer ${token}`,
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
-          accept: 'application/json',
+          'user-agent': USER_AGENT,
+          accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'accept-language': 'en-US,en;q=0.9',
+          referer: 'https://www.ebay.com/',
+          cookie: cookies,
         },
       })
-      if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
+      if (!res.ok) {
+        cookieCache = null
+        throw new Error(`eBay: HTTP ${res.status}`)
+      }
 
-      const data = (await res.json()) as EbaySearchResponse
-      return (data.itemSummaries ?? []).map((item) => {
-        const priceVal = parseFloat(item.price?.value ?? '0')
-        const shippingVal = parseFloat(item.shippingOptions?.[0]?.shippingCost?.value ?? '0')
-        const feedbackPct = item.seller?.feedbackPercentage
-          ? parseFloat(item.seller.feedbackPercentage) / 100
-          : undefined
-        return {
-          externalId: item.itemId,
-          title: item.title,
-          url: item.itemWebUrl,
-          imageUrl: item.image?.imageUrl ?? item.thumbnailImages?.[0]?.imageUrl,
-          priceMinor: Math.round(priceVal * 100),
-          currency: item.price?.currency ?? 'USD',
-          shippingMinor: Number.isFinite(shippingVal) ? Math.round(shippingVal * 100) : undefined,
-          sellerName: item.seller?.username,
-          sellerRating: feedbackPct ? Math.round(feedbackPct * 50) / 10 : undefined,
-          reviewCount: item.seller?.feedbackScore,
-          availability: item.condition === 'New' ? 'in_stock' : undefined,
-        }
-      })
+      const html = await res.text()
+      if (html.length < 5000 && html.includes('Error Page')) {
+        cookieCache = null
+        throw new Error('eBay: blocked')
+      }
+
+      return parseSearchHtml(html).slice(0, 12)
     },
   }
 }

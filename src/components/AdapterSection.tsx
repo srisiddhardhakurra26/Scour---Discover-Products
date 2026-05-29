@@ -88,6 +88,7 @@ const TYPE_COLORS: Record<string, string> = {
   ebay: 'text-blue-300/80',
   etsy: 'text-pink-300/80',
   bestbuy: 'text-yellow-300/80',
+  amazon: 'text-orange-200/80',
   mock: 'text-fg-subtle',
 }
 

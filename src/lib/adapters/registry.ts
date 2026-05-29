@@ -10,6 +10,7 @@ import { createRedditAdapter } from './reddit'
 import { createEbayAdapter } from './ebay'
 import { createEtsyAdapter } from './etsy'
 import { createBestBuyAdapter } from './bestbuy'
+import { createAmazonAdapter } from './amazon'
 
 export const ADAPTER_TIMEOUT_MS = 4000
 
@@ -36,6 +37,9 @@ function buildAdapter(r: Retailer): Adapter | null {
   }
   if (r.type === 'bestbuy' && r.identifier === 'bestbuy') {
     return createBestBuyAdapter(r.id, label)
+  }
+  if (r.type === 'amazon' && r.identifier === 'amazon') {
+    return createAmazonAdapter(r.id, label)
   }
   if (r.type === 'mock' && r.identifier === 'mock-ebay') {
     return createMockEbayAdapter(r.id, label)

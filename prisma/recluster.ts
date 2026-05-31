@@ -14,8 +14,10 @@ const SIMILARITY_THRESHOLD = 0.82
 const PRICE_RATIO_LOW = 0.25
 const PRICE_RATIO_HIGH = 4.0
 
-function floatToBytes(arr: Float32Array): Uint8Array {
-  return new Uint8Array(arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength))
+function floatToBytes(arr: Float32Array): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(arr.byteLength)
+  out.set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength))
+  return out
 }
 
 function bytesToFloat(bytes: Uint8Array | Buffer): Float32Array {

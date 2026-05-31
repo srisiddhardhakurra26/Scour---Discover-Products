@@ -1,33 +1,88 @@
 import * as cheerio from 'cheerio'
-import type { Cheerio } from 'cheerio'
-import type { AnyNode } from 'domhandler'
 import type { Adapter, NormalizedListing } from './types'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
-import { renderPage } from '@/lib/browser'
+import { extractListings } from './generic-extract'
+import { repairGenericAdapter } from '@/lib/llm/adapter-repair'
+import { renderPage, looksLikeJsShell } from '@/lib/browser'
+import { prisma } from '@/lib/db'
 
 const REALISTIC_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
 
-function parsePriceMinor(text: string): number {
-  const m = text.match(/([0-9]+(?:[.,][0-9]+)*)/)
-  if (!m) return 0
-  const num = parseFloat(m[1].replace(/,/g, ''))
-  return Number.isFinite(num) ? Math.round(num * 100) : 0
-}
+/** Fetch (or render) the search-results HTML for a config + query. */
+async function loadSearchHtml(
+  config: GenericHtmlConfig,
+  query: string,
+  domain: string,
+  label: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const url = config.searchUrlTemplate.replace('{query}', encodeURIComponent(query))
 
-function pickAttr(el: Cheerio<AnyNode>, attrs: string[]): string | undefined {
-  for (const a of attrs) {
-    const v = el.attr(a)
-    if (v && v.trim()) return v.trim()
+  let html: string
+  if (config.requiresJs) {
+    // Render with Chromium so SPA-rendered cards exist in the DOM.
+    const rendered = await renderPage(url, 18_000)
+    html = rendered.html
+  } else {
+    const res = await fetch(url, {
+      signal,
+      headers: {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': REALISTIC_UA,
+        referer: `https://${domain}/`,
+      },
+    })
+    if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
+    html = await res.text()
+
+    // Plain fetch returned a JS shell, or nothing the selector matched.
+    // Re-render with Chromium and try again. This catches sites where the
+    // onboarder happened to verify against a partly-SSR'd page but real
+    // queries return content-light shells that need JS to populate.
+    if (cheerio.load(html)(config.productSelector).length === 0 || looksLikeJsShell(html)) {
+      const rendered = await renderPage(url, 18_000)
+      html = rendered.html
+    }
   }
-  return undefined
+  return html
 }
 
-function absoluteUrl(url: string, prefix?: string): string {
-  if (/^https?:\/\//i.test(url)) return url
-  if (!prefix) return url
-  if (url.startsWith('/')) return `${prefix}${url}`
-  return `${prefix}/${url}`
+// Retailers currently being auto-repaired, keyed by id. A search that finds 0
+// results triggers the repair agent; concurrent searches for the same retailer
+// (e.g. a quick re-query, or both result views) skip it so we never run the
+// expensive Playwright+LLM repair more than once at a time per source.
+const repairing = new Set<string>()
+
+/**
+ * Run the repair agent once for a retailer that just returned 0 results,
+ * persist the fix, and hand back the corrected config. Returns null if a
+ * repair is already in flight or the agent couldn't produce a verified fix.
+ */
+async function autoRepair(
+  id: string,
+  domain: string,
+  config: GenericHtmlConfig,
+  query: string,
+): Promise<GenericHtmlConfig | null> {
+  if (repairing.has(id)) return null
+  repairing.add(id)
+  try {
+    const fixed = await repairGenericAdapter(domain, config, query)
+    if (!fixed) return null
+    await prisma.retailer.update({
+      where: { id },
+      data: { config: JSON.stringify(fixed), lastError: null },
+    })
+    console.log(`[generic-html] auto-repaired ${domain}`)
+    return fixed
+  } catch (err) {
+    console.error(`[generic-html] auto-repair ${domain}:`, err)
+    return null
+  } finally {
+    repairing.delete(id)
+  }
 }
 
 export function createGenericHtmlAdapter(
@@ -41,64 +96,18 @@ export function createGenericHtmlAdapter(
     label,
     type: 'generic-html',
     async search(query, signal): Promise<NormalizedListing[]> {
-      const url = config.searchUrlTemplate.replace('{query}', encodeURIComponent(query))
+      const html = await loadSearchHtml(config, query, domain, label, signal)
+      const results = extractListings(html, config, domain, label)
+      if (results.length > 0) return results
 
-      let html: string
-      if (config.requiresJs) {
-        // Render with Chromium so SPA-rendered cards exist in the DOM.
-        const rendered = await renderPage(url, 18_000)
-        html = rendered.html
-      } else {
-        const res = await fetch(url, {
-          signal,
-          headers: {
-            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'accept-language': 'en-US,en;q=0.9',
-            'user-agent': REALISTIC_UA,
-            referer: `https://${domain}/`,
-          },
-        })
-        if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
-        html = await res.text()
-      }
+      // Zero results usually means the site changed its markup and the stored
+      // selectors are stale. Self-heal: run the repair agent once, persist the
+      // fix, and retry extraction with the corrected config in this same search.
+      const fixed = await autoRepair(id, domain, config, query)
+      if (!fixed) return results
 
-      const $ = cheerio.load(html)
-      const cards = $(config.productSelector)
-      const results: NormalizedListing[] = []
-      const prefix = config.urlPrefix ?? `https://${domain}`
-      const currency = config.currency ?? 'USD'
-
-      cards.each((i, el) => {
-        if (results.length >= 12) return false
-        const card = $(el)
-
-        const title = card.find(config.titleSelector).first().text().trim()
-        if (!title) return
-        const priceText = card.find(config.priceSelector).first().text().trim()
-        const priceMinor = parsePriceMinor(priceText)
-
-        const link = card.find(config.urlSelector).first()
-        const href = pickAttr(link, ['href'])
-        if (!href) return
-        const productUrl = absoluteUrl(href, prefix)
-
-        const img = card.find(config.imageSelector).first()
-        const rawSrc = pickAttr(img, ['src', 'data-src', 'data-original', 'data-lazy-src'])
-        const imageUrl = rawSrc ? absoluteUrl(rawSrc, prefix) : undefined
-
-        results.push({
-          externalId: productUrl,
-          title,
-          url: productUrl,
-          imageUrl,
-          priceMinor,
-          currency,
-          sellerName: config.brandName ?? label,
-        })
-        return
-      })
-
-      return results
+      const retryHtml = await loadSearchHtml(fixed, query, domain, label, signal)
+      return extractListings(retryHtml, fixed, domain, label)
     },
   }
 }

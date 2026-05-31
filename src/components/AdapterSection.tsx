@@ -23,19 +23,21 @@ export async function AdapterSection({
     if (rawListings.length === 0) return null
 
     const ranked = await rankByRelevance(query, rawListings, parsed)
-    const elapsedMs = Math.round(performance.now() - started)
 
-    after(async () => {
-      try {
-        await persistListings(
-          adapter.id,
-          ranked.kept.map((r) => r.listing),
-          ranked.kept.map((r) => r.embedding),
-        )
-      } catch (err) {
-        console.error(`[persist] ${adapter.label}:`, err)
-      }
-    })
+    // Persist synchronously (not via `after()`) so the ClusteredProductsSection,
+    // which renders in a parallel Suspense boundary and polls the DB, can see
+    // these writes before the response is sent.
+    try {
+      await persistListings(
+        adapter.id,
+        ranked.kept.map((r) => r.listing),
+        ranked.kept.map((r) => r.embedding),
+      )
+    } catch (err) {
+      console.error(`[persist] ${adapter.label}:`, err)
+    }
+
+    const elapsedMs = Math.round(performance.now() - started)
 
     if (ranked.kept.length === 0) return null
 

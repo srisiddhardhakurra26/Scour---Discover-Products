@@ -60,8 +60,13 @@ export function dotProduct(a: Float32Array, b: Float32Array): number {
 }
 
 /** Convert a Float32Array to a byte view suitable for Prisma Bytes columns. */
-export function floatToBytes(arr: Float32Array): Uint8Array {
-  return new Uint8Array(arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength))
+export function floatToBytes(arr: Float32Array): Uint8Array<ArrayBuffer> {
+  // Copy into a fresh ArrayBuffer (not SharedArrayBuffer) so the resulting
+  // Uint8Array is typed as Uint8Array<ArrayBuffer>, which is what Prisma's
+  // Bytes column expects.
+  const out = new Uint8Array(arr.byteLength)
+  out.set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength))
+  return out
 }
 
 /** Convert Bytes back to a Float32Array. Works for both Buffer and Uint8Array. */

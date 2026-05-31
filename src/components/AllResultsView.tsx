@@ -23,23 +23,25 @@ export async function AllResultsView({
   const parsed = await parseQuery(query)
   const searchQuery = parsed.refinedQuery || query
 
-  // Fan out in parallel, persist via after() so DB writes don't block.
+  // Fan out in parallel. Persistence is awaited inline (not via after()) so
+  // ClusteredProductsSection's DB poll can see these writes.
   const results = await Promise.all(
     adapters.map(async (adapter) => {
       try {
         const raw = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
         const ranked = await rankByRelevance(query, raw, parsed)
-        after(async () => {
-          try {
-            await persistListings(
-              adapter.id,
-              ranked.kept.map((r) => r.listing),
-              ranked.kept.map((r) => r.embedding),
-            )
-          } catch (err) {
-            console.error(`[persist] ${adapter.label}:`, err)
-          }
-        })
+        // Persist synchronously so ClusteredProductsSection (parallel Suspense
+        // boundary, polls the DB) can see these listings before the response
+        // is flushed.
+        try {
+          await persistListings(
+            adapter.id,
+            ranked.kept.map((r) => r.listing),
+            ranked.kept.map((r) => r.embedding),
+          )
+        } catch (err) {
+          console.error(`[persist] ${adapter.label}:`, err)
+        }
         return { adapter, kept: ranked.kept }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'unknown error'

@@ -2,7 +2,10 @@ import { Suspense } from 'react'
 import { Header } from '@/components/Header'
 import { SearchBar } from '@/components/SearchBar'
 import { AdapterSection, AdapterLoading } from '@/components/AdapterSection'
-import { ClusteredProductsSection } from '@/components/ClusteredProductsSection'
+import {
+  ClusteredProductsSection,
+  ClusteredProductsLoading,
+} from '@/components/ClusteredProductsSection'
 import { AllResultsView, AllResultsLoading } from '@/components/AllResultsView'
 import { SearchToolbar, type SortKey, type ViewMode } from '@/components/SearchToolbar'
 import { getAdapters, ADAPTER_TIMEOUT_MS } from '@/lib/adapters/registry'
@@ -58,7 +61,9 @@ export default async function SearchPage({
           </div>
         ) : (
           <div className="flex flex-col gap-10">
-            <ClusteredProductsSection query={query} />
+            <Suspense fallback={<ClusteredProductsLoading />}>
+              <ClusteredProductsSection query={query} />
+            </Suspense>
 
             {view === 'all' ? (
               <Suspense fallback={<AllResultsLoading />}>

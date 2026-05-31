@@ -1,5 +1,7 @@
 import { generateJson } from './client'
 import type { GenericHtmlConfig } from './source-onboarder'
+import { focusSearchHtml } from './html-focus'
+import { extractListings } from '@/lib/adapters/generic-extract'
 import { renderPage } from '@/lib/browser'
 
 const SYSTEM = `You repair a broken e-commerce scraper config.
@@ -89,39 +91,29 @@ function validate(raw: unknown): GenericHtmlConfig | null {
   return cfg
 }
 
-/**
- * Re-run the onboarder against the search-results page using the current
- * config and a sample query. Returns an updated config if the LLM produced
- * one that validates, otherwise null.
- */
-export async function repairGenericAdapter(
+async function askForFix(
   domain: string,
   config: GenericHtmlConfig,
   sampleQuery: string,
+  pages: { homepage: string; search: { status: number; html: string } },
+  retry?: { previous: GenericHtmlConfig; reason: string },
 ): Promise<GenericHtmlConfig | null> {
-  let pages: { homepage: string; search: { status: number; html: string } }
-  try {
-    pages = await renderRepairPages(domain, config.searchUrlTemplate, sampleQuery)
-  } catch (err) {
-    console.error('[adapter-repair] render:', err)
-    return null
-  }
+  const base =
+    `Domain: ${domain}\n` +
+    `Sample query: ${sampleQuery}\n` +
+    `Search HTTP status: ${pages.search.status}\n` +
+    `Current config:\n${JSON.stringify(config, null, 2)}\n\n` +
+    `--- HOMEPAGE HTML (truncated) ---\n${truncate(pages.homepage, 12000)}\n\n` +
+    `--- SEARCH RESULTS PRODUCT GRID ---\n${focusSearchHtml(pages.search.html)}`
+  const user = retry
+    ? `${base}\n\nYour previous fix was:\n${JSON.stringify(retry.previous)}\n\n` +
+      `It still failed: ${retry.reason}\n\nReturn a corrected config.`
+    : base
 
   let json: string
   try {
     json = await generateJson(
-      {
-        system: SYSTEM,
-        user:
-          `Domain: ${domain}\n` +
-          `Sample query: ${sampleQuery}\n` +
-          `Search HTTP status: ${pages.search.status}\n` +
-          `Current config:\n${JSON.stringify(config, null, 2)}\n\n` +
-          `--- HOMEPAGE HTML (truncated) ---\n${truncate(pages.homepage, 12000)}\n\n` +
-          `--- SEARCH RESULTS HTML (truncated) ---\n${truncate(pages.search.html, 14000)}`,
-        tier: 'reasoning',
-        maxTokens: 800,
-      },
+      { system: SYSTEM, user, tier: 'reasoning', maxTokens: 800 },
       AbortSignal.timeout(40_000),
     )
   } catch (err) {
@@ -139,4 +131,72 @@ export async function repairGenericAdapter(
     console.error('[adapter-repair] parse:', err)
     return null
   }
+}
+
+/**
+ * Re-run the onboarder against the search-results page using the current
+ * config and a sample query. The proposed fix is verified against the actual
+ * rendered search page — its productSelector must match at least one card —
+ * before it's accepted, with one retry that feeds the failure back to the LLM.
+ * Returns an updated, verified config, otherwise null.
+ */
+export async function repairGenericAdapter(
+  domain: string,
+  config: GenericHtmlConfig,
+  sampleQuery: string,
+): Promise<GenericHtmlConfig | null> {
+  let pages: { homepage: string; search: { status: number; html: string } }
+  try {
+    pages = await renderRepairPages(domain, config.searchUrlTemplate, sampleQuery)
+  } catch (err) {
+    console.error('[adapter-repair] render:', err)
+    return null
+  }
+
+  let fixed = await askForFix(domain, config, sampleQuery, pages)
+  if (!fixed) return null
+
+  // Verify the fix by running the *real* extraction against the rendered search
+  // page. Matching productSelector alone isn't enough: a config can match cards
+  // yet have a wrong title/url selector so every card is dropped, silently
+  // returning 0 results again. We require at least one fully-extracted listing.
+  const verifyExtracts = async (cfg: GenericHtmlConfig): Promise<number> => {
+    let html = pages.search.html
+    // If the LLM changed the search URL, the page we already rendered no longer
+    // applies — render the new URL so we verify against what the adapter will
+    // actually fetch.
+    if (cfg.searchUrlTemplate !== config.searchUrlTemplate) {
+      const url = cfg.searchUrlTemplate.replace('{query}', encodeURIComponent(sampleQuery))
+      try {
+        html = (await renderPage(url, 25_000)).html
+      } catch {
+        return 0
+      }
+    }
+    return extractListings(html, cfg, domain, cfg.brandName ?? domain).length
+  }
+
+  let listings = await verifyExtracts(fixed)
+  if (listings === 0) {
+    console.warn(`[adapter-repair] fix extracted 0 listings — retrying`)
+    const retry = await askForFix(domain, config, sampleQuery, pages, {
+      previous: fixed,
+      reason:
+        `that config extracted 0 listings from the rendered search page. ` +
+        `productSelector "${fixed.productSelector}" may match containers, but ` +
+        `titleSelector "${fixed.titleSelector}" and/or urlSelector ` +
+        `"${fixed.urlSelector}" produced empty values for every card. Pick ` +
+        `selectors that actually contain the product title text and an <a href>.`,
+    })
+    if (!retry) return null
+    fixed = retry
+    listings = await verifyExtracts(fixed)
+    if (listings === 0) {
+      console.error(`[adapter-repair] fix still extracted 0 listings after retry`)
+      return null
+    }
+  }
+
+  console.log(`[adapter-repair] ${domain}: verified ${listings} listings extracted`)
+  return fixed
 }

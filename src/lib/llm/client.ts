@@ -80,6 +80,10 @@ async function tryGemini(opts: JsonOptions, signal: AbortSignal): Promise<string
         temperature: 0,
         maxOutputTokens: opts.maxTokens ?? 1024,
         responseMimeType: 'application/json',
+        // Gemini 2.5 spends tokens "thinking" before emitting output, which
+        // can blow the budget and truncate the JSON. Disable for deterministic
+        // JSON jobs — we don't need chain-of-thought to emit selectors.
+        thinkingConfig: { thinkingBudget: 0 },
       },
     }),
   })
@@ -92,7 +96,17 @@ async function tryGemini(opts: JsonOptions, signal: AbortSignal): Promise<string
   }
   const content = data.candidates?.[0]?.content?.parts?.[0]?.text
   if (!content) throw new LlmError('gemini', null, 'empty response')
-  return content
+  return stripJsonFences(content)
+}
+
+// Some providers occasionally wrap JSON output in ```json ... ``` fences even
+// when asked for raw JSON. Strip them so JSON.parse doesn't choke.
+function stripJsonFences(s: string): string {
+  const trimmed = s.trim()
+  if (trimmed.startsWith('```')) {
+    return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim()
+  }
+  return trimmed
 }
 
 /**

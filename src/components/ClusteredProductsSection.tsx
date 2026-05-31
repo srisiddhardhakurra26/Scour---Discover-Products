@@ -32,8 +32,53 @@ function clusterHasTokenOverlap(query: string, titles: string[]): boolean {
   return qTokens.every((tok) => lowered.some((title) => tokenMatchesTitle(tok, title)))
 }
 
-export async function ClusteredProductsSection({ query }: { query: string }) {
-  const products = await prisma.product.findMany({
+export function ClusteredProductsLoading() {
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex items-baseline justify-between gap-3 border-b border-accent/40 pb-2">
+        <div className="flex items-baseline gap-2.5">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-accent-strong">
+            Products
+          </h2>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-accent/80">
+            clustering…
+          </span>
+        </div>
+        <span className="font-mono text-[11px] tabular-nums text-fg-subtle">
+          comparing across retailers
+        </span>
+      </div>
+      <div className="flex gap-3 overflow-hidden pb-1">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div
+            key={i}
+            className="flex h-[152px] w-[360px] shrink-0 animate-pulse gap-3 rounded-xl border border-border bg-bg-card p-3"
+          >
+            <div className="h-24 w-24 shrink-0 rounded-lg bg-bg-elevated" />
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <div className="h-3 w-3/4 rounded bg-bg-elevated" />
+              <div className="h-3 w-1/2 rounded bg-bg-elevated" />
+              <div className="mt-1 flex flex-col gap-1.5">
+                <div className="h-2 w-full rounded bg-bg-elevated/70" />
+                <div className="h-2 w-full rounded bg-bg-elevated/70" />
+                <div className="h-2 w-2/3 rounded bg-bg-elevated/70" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// We render in parallel with the adapter Suspense boundaries (which now
+// persist synchronously). Poll the DB until either we find visible clusters
+// or hit this timeout so adapters get a chance to write their results first.
+const POLL_TIMEOUT_MS = 7000
+const POLL_INTERVAL_MS = 600
+
+function fetchClusterCandidates() {
+  return prisma.product.findMany({
     where: { retailerCount: { gte: 2 } },
     include: {
       listings: {
@@ -51,52 +96,75 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
     orderBy: { lastSeenAt: 'desc' },
     take: 200,
   })
+}
 
-  if (products.length === 0) return null
+type Candidate = Awaited<ReturnType<typeof fetchClusterCandidates>>[number]
 
-  // Rank clusters by max cosine similarity between query embedding and any
-  // listing's title embedding inside the cluster. Drop low-scorers and
-  // anything whose entire price band falls outside the LLM-parsed budget.
-  let ranked = products.map((p) => ({ product: p, score: 0 }))
-  if (query.trim()) {
-    const parsed = await parseQuery(query)
-    const matchQuery = parsed.refinedQuery || query
-    const queryVec = await embedQueryCached(matchQuery)
-    ranked = products
-      .map((p) => {
-        let best = 0
-        for (const l of p.listings) {
-          if (!l.textEmbedding) continue
-          const v = bytesToFloat(l.textEmbedding)
-          if (v.length !== EMBEDDING_DIM) continue
-          const s = dotProduct(queryVec, v)
-          if (s > best) best = s
+function rankForQuery(
+  products: Candidate[],
+  matchQuery: string,
+  queryVec: Float32Array,
+  parsed: Awaited<ReturnType<typeof parseQuery>>,
+): Candidate[] {
+  return products
+    .map((p) => {
+      let best = 0
+      for (const l of p.listings) {
+        if (!l.textEmbedding) continue
+        const v = bytesToFloat(l.textEmbedding)
+        if (v.length !== EMBEDDING_DIM) continue
+        const s = dotProduct(queryVec, v)
+        if (s > best) best = s
+      }
+      return { product: p, score: best }
+    })
+    .filter((r) => {
+      if (r.score < CLUSTER_RELEVANCE_FLOOR) return false
+      const titles = [r.product.canonicalTitle, ...r.product.listings.map((l) => l.title)]
+      if (!clusterHasTokenOverlap(matchQuery, titles)) return false
+      if (parsed.maxPriceMinor !== undefined || parsed.minPriceMinor !== undefined) {
+        const priced = r.product.listings.filter((l) => l.priceMinor > 0)
+        if (priced.length > 0) {
+          const anyInside = priced.some((l) => {
+            if (parsed.maxPriceMinor !== undefined && l.priceMinor > parsed.maxPriceMinor) return false
+            if (parsed.minPriceMinor !== undefined && l.priceMinor < parsed.minPriceMinor) return false
+            return true
+          })
+          if (!anyInside) return false
         }
-        return { product: p, score: best }
-      })
-      .filter((r) => {
-        if (r.score < CLUSTER_RELEVANCE_FLOOR) return false
-        const titles = [r.product.canonicalTitle, ...r.product.listings.map((l) => l.title)]
-        if (!clusterHasTokenOverlap(matchQuery, titles)) return false
-        // Drop the cluster if every priced listing is outside the user's
-        // budget — same idea as the per-listing filter but at cluster level.
-        if (parsed.maxPriceMinor !== undefined || parsed.minPriceMinor !== undefined) {
-          const priced = r.product.listings.filter((l) => l.priceMinor > 0)
-          if (priced.length > 0) {
-            const anyInside = priced.some((l) => {
-              if (parsed.maxPriceMinor !== undefined && l.priceMinor > parsed.maxPriceMinor) return false
-              if (parsed.minPriceMinor !== undefined && l.priceMinor < parsed.minPriceMinor) return false
-              return true
-            })
-            if (!anyInside) return false
-          }
-        }
-        return true
-      })
-      .sort((a, b) => b.score - a.score)
+      }
+      return true
+    })
+    .sort((a, b) => b.score - a.score)
+    .map((r) => r.product)
+}
+
+export async function ClusteredProductsSection({ query }: { query: string }) {
+  // Pre-compute the query embedding + parse once; both are reused across
+  // every poll iteration below.
+  const parsed = query.trim() ? await parseQuery(query) : null
+  const matchQuery = parsed?.refinedQuery || query
+  const queryVec = parsed ? await embedQueryCached(matchQuery) : null
+
+  // Poll the DB. Adapters in parallel Suspense boundaries are persisting
+  // listings synchronously during their render; this loop waits for those
+  // writes (and any resulting cluster updates) to show up.
+  const deadline = Date.now() + POLL_TIMEOUT_MS
+  let visible: Candidate[] = []
+  while (true) {
+    const products = await fetchClusterCandidates()
+    if (products.length > 0) {
+      const ranked =
+        queryVec && parsed
+          ? rankForQuery(products, matchQuery, queryVec, parsed)
+          : products
+      visible = ranked.slice(0, 12)
+      if (visible.length > 0) break
+    }
+    if (Date.now() >= deadline) break
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
   }
 
-  const visible = ranked.slice(0, 12).map((r) => r.product)
   if (visible.length === 0) return null
 
   const totalListings = visible.reduce((acc, p) => acc + p.listings.length, 0)

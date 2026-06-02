@@ -3,9 +3,16 @@ import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
+import { rerankCandidates } from '@/lib/llm/rerank'
 import { withHardTimeout } from '@/lib/timeout'
 import { ListingCard } from './ListingCard'
 import { CardRail } from './CardRail'
+
+// Precision rerank for the by-source view (mirrors AllResultsView). Catalog-dump
+// sources (Shopify/Woo return the whole catalog, query ignored) otherwise show
+// off-intent items here — e.g. a shoe store listing shoes for a "backpack" query.
+const RERANK_KEEP = 0.45
+const RERANK_DISPLAY_CAP = 40
 
 type SectionData = {
   kept: RankedListing[]
@@ -38,9 +45,9 @@ async function loadAdapterSection(
 
     const ranked = await rankByRelevance(query, rawListings, parsed, recallModeForType(adapter.type))
 
-    // Persist synchronously (not via `after()`) so ClusteredProductsSection,
+    // Persist the full ranked set (not via `after()`) so ClusteredProductsSection,
     // which renders in a parallel Suspense boundary and polls the DB, can see
-    // these writes before the response is sent.
+    // these writes before the response is sent. Clustering does its own filtering.
     try {
       await persistListings(
         adapter.id,
@@ -51,9 +58,36 @@ async function loadAdapterSection(
       console.error(`[persist] ${adapter.label}:`, err)
     }
 
+    // Precision pass before display: judge true intent and drop off-target
+    // catalog items. On LLM failure, fall back to embedding order.
+    let display = ranked.kept.slice(0, RERANK_DISPLAY_CAP)
+    if (display.length > 1) {
+      const scores = await rerankCandidates(
+        query,
+        parsed,
+        display.map((r) => ({
+          id: r.listing.externalId,
+          title: r.listing.title,
+          brand: r.listing.sellerName,
+          priceMinor: r.listing.priceMinor,
+          currency: r.listing.currency,
+        })),
+      )
+      if (scores) {
+        display = display
+          .flatMap((r) => {
+            const s = scores.get(r.listing.externalId)
+            if (s === undefined) return [r]
+            if (s < RERANK_KEEP) return []
+            return [{ ...r, score: s }]
+          })
+          .sort((a, b) => b.score - a.score)
+      }
+    }
+
     return {
-      kept: ranked.kept,
-      dropped: ranked.dropped,
+      kept: display,
+      dropped: rawListings.length - display.length,
       rawCount: rawListings.length,
       elapsedMs: Math.round(performance.now() - started),
     }

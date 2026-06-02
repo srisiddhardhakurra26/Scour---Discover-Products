@@ -21,10 +21,10 @@ Given a shopper's intent and a numbered list of candidate products, score how we
 Judge by PRODUCT TYPE and ATTRIBUTES using real-world knowledge — NOT surface word overlap:
 - A Chelsea boot, work boot, or Blundstone IS a kind of "shoes"/"footwear" → score high for a "shoes" query.
 - A sneaker, running shoe, or trainer is NOT a "leather boot" → score low for a "leather boots" query.
-- Honor demanded attributes: material ("leather"), features, gender/use when stated. Missing a hard attribute the shopper asked for → low, even if the broad category is right.
+- Demanded attributes are MANDATORY, not nice-to-haves. If the shopper specified a material ("leather", "suede"), feature, gender, or use, a candidate that does not clearly match it scores low (<= 0.3) — even when the broad product category is right. Do NOT assume an unstated attribute is satisfied: if a required material is neither stated in the title nor strongly implied by the model/product, treat the match as weak, not strong.
 - Care kits, laces, socks, cleaners, beanies and other accessories are NOT the product unless the shopper asked for them → low.
 
-Return ONLY JSON of the form {"scores": {"<id>": <number 0..1>, ...}} with an entry for EVERY id you were given. No commentary.`
+Score EVERY id you are given — never omit one. Return ONLY JSON of the form {"scores": {"<id>": <number 0..1>, ...}}. No commentary.`
 
 function buildUser(
   query: string,
@@ -52,9 +52,11 @@ function validate(raw: unknown, idxCount: number): Map<string, number> | null {
     const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN
     if (Number.isFinite(n)) out.set(k, Math.max(0, Math.min(1, n)))
   }
-  // Demand coverage of at least half the candidates; a sparse response means
-  // the judge misbehaved — treat as failure so the caller keeps embedding order.
-  if (out.size < Math.ceil(idxCount / 2)) return null
+  // The judge is told to score EVERY id, so demand near-complete coverage. A
+  // sparse answer means it misbehaved — or silently dropped the candidates it
+  // judged irrelevant, which the caller would later read as "keep". Either way
+  // don't trust a half-answer: fail so the caller falls back to embedding order.
+  if (out.size < Math.ceil(idxCount * 0.8)) return null
   return out
 }
 
@@ -115,12 +117,16 @@ export async function rerankCandidates(
   }
   if (!idxScores) return null
 
-  // Map positional ids back to the caller's real ids.
+  // Map positional ids back to the caller's real ids, building a TOTAL map:
+  // every candidate gets a score. validate() already guaranteed the judge
+  // covered >= 80% of ids, so any id still missing here is a deliberate "not
+  // relevant" — default it to 0 (which callers drop) instead of leaving it
+  // unscored, which callers silently KEEP. That silent-keep was letting
+  // off-intent items (e.g. non-leather shoes for "leather shoes") slip through.
   const out: RerankScores = new Map()
-  for (const [idx, score] of idxScores) {
-    const c = candidates[Number(idx)]
-    if (c) out.set(c.id, score)
-  }
+  candidates.forEach((c, i) => {
+    out.set(c.id, idxScores.get(String(i)) ?? 0)
+  })
 
   memo.set(key, { value: out, expiresAt: Date.now() + CACHE_TTL_MS })
   return out

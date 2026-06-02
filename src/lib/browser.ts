@@ -10,7 +10,16 @@ async function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
     browserPromise = (async () => {
       const { chromium } = await import('playwright')
-      return chromium.launch({ headless: true })
+      return chromium.launch({
+        headless: true,
+        args: [
+          // Docker's /dev/shm defaults to 64MB; without this Chromium can crash.
+          '--disable-dev-shm-usage',
+          // The container runs as root, where Chromium refuses to start unless
+          // the sandbox is disabled. Opt-in via env so local dev keeps it on.
+          ...(process.env.PLAYWRIGHT_NO_SANDBOX ? ['--no-sandbox'] : []),
+        ],
+      })
     })()
   }
   return browserPromise

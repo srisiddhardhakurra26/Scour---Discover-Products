@@ -66,7 +66,9 @@ export async function AllResultsView({
   // Cap to the strongest candidates, judge exactly that displayed set, and cut
   // the tail. Time-boxed inside rerankCandidates; on failure we fall back to
   // embedding order (still capped).
-  const DISPLAY_CAP = 60
+  // Cap the set the judge scores in one shot. A reasoning model rates ~40 short
+  // titles far more reliably than 60 — fewer omissions, sharper per-item calls.
+  const DISPLAY_CAP = 40
   let all = [...pool].sort((a, b) => b.score - a.score).slice(0, DISPLAY_CAP)
   if (all.length > 1) {
     const scores = await rerankCandidates(

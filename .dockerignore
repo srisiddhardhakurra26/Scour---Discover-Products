@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+.next
+.env
+.env.*
+*.db
+prisma/*.db
+prisma/*.db-journal
+.DS_Store
+.antigravitycli
+npm-debug.log*
+*.md

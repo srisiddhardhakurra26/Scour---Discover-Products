@@ -1,0 +1,7 @@
+# SITE_ADDRESS comes from .env.
+#   :80                       -> plain HTTP on the server's IP (quickest start)
+#   203-0-113-5.sslip.io      -> free auto-HTTPS, no domain needed
+#   scour.example.com         -> your own domain, auto-HTTPS
+{$SITE_ADDRESS} {
+	reverse_proxy app:3000
+}

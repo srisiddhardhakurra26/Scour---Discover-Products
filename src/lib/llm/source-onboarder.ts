@@ -1,7 +1,7 @@
-import * as cheerio from 'cheerio'
 import { generateJson } from './client'
 import { focusSearchHtml, locateProductGrid } from './html-focus'
 import { looksLikeJsShell, renderPage } from '@/lib/browser'
+import { extractListings } from '@/lib/adapters/generic-extract'
 
 export type GenericHtmlConfig = {
   /** Template with literal `{query}` to interpolate the user's search. */
@@ -346,41 +346,54 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
   let selectors = await askForSelectors(domain, searchPage.html)
   if (!selectors) return null
 
-  const $ = cheerio.load(searchPage.html)
-  let matches = $(selectors.productSelector).length
-  if (matches === 0) {
+  const requiresJs = searchPage.requiresJs || homepage.requiresJs
+  const buildConfig = (s: SelectorConfig): GenericHtmlConfig => ({
+    searchUrlTemplate: urlCfg.searchUrlTemplate,
+    productSelector: s.productSelector,
+    titleSelector: s.titleSelector,
+    priceSelector: s.priceSelector,
+    imageSelector: s.imageSelector,
+    urlSelector: s.urlSelector,
+    urlPrefix: urlCfg.urlPrefix,
+    currency: urlCfg.currency,
+    brandName: urlCfg.brandName,
+    requiresJs,
+  })
+
+  // Verify by running the *real* extraction — not just matching productSelector.
+  // A selector can match card containers yet have a wrong title/url selector, so
+  // every card is dropped: the source would onboard "green" then return 0 on the
+  // first real search (and immediately trip auto-repair). Require at least one
+  // fully-extracted listing, the same bar adapter-repair uses.
+  const label = urlCfg.brandName ?? domain
+  let listings = extractListings(searchPage.html, buildConfig(selectors), domain, label).length
+  if (listings === 0) {
     console.warn(
-      `[source-onboarder] productSelector "${selectors.productSelector}" matched 0 elements — retrying selector stage`,
+      `[source-onboarder] selectors extracted 0 complete listings — retrying selector stage`,
     )
     const retry = await askForSelectors(domain, searchPage.html, {
       previous: selectors,
-      reason: `productSelector "${selectors.productSelector}" matched 0 elements on the actual search results page`,
+      reason:
+        `those selectors extracted 0 complete listings from the actual search results page. ` +
+        `productSelector "${selectors.productSelector}" may match containers, but ` +
+        `titleSelector "${selectors.titleSelector}" and/or urlSelector "${selectors.urlSelector}" ` +
+        `produced empty values for every card. Pick selectors whose elements actually contain ` +
+        `the product title text and an <a href> to the product page.`,
     })
     if (!retry) return null
     selectors = retry
-    matches = $(selectors.productSelector).length
-    if (matches === 0) {
+    listings = extractListings(searchPage.html, buildConfig(selectors), domain, label).length
+    if (listings === 0) {
       console.error(
-        `[source-onboarder] productSelector "${selectors.productSelector}" still matched 0 elements after retry`,
+        `[source-onboarder] selectors still extracted 0 complete listings after retry`,
       )
       return null
     }
   }
 
   console.log(
-    `[source-onboarder] ${domain}: ${matches} product cards matched on ${searchUrl}`,
+    `[source-onboarder] ${domain}: ${listings} listings extracted on ${searchUrl}`,
   )
 
-  return {
-    searchUrlTemplate: urlCfg.searchUrlTemplate,
-    productSelector: selectors.productSelector,
-    titleSelector: selectors.titleSelector,
-    priceSelector: selectors.priceSelector,
-    imageSelector: selectors.imageSelector,
-    urlSelector: selectors.urlSelector,
-    urlPrefix: urlCfg.urlPrefix,
-    currency: urlCfg.currency,
-    brandName: urlCfg.brandName,
-    requiresJs: searchPage.requiresJs || homepage.requiresJs,
-  }
+  return buildConfig(selectors)
 }

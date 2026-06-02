@@ -1,7 +1,7 @@
 import { after } from 'next/server'
-import type { Adapter, NormalizedListing } from '@/lib/adapters/types'
+import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
-import { rankByRelevance, type RankedListing } from '@/lib/relevance'
+import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
 import { formatPrice } from '@/lib/format'
 import { ListingCard } from './ListingCard'
@@ -29,7 +29,7 @@ export async function AllResultsView({
     adapters.map(async (adapter) => {
       try {
         const raw = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
-        const ranked = await rankByRelevance(query, raw, parsed)
+        const ranked = await rankByRelevance(query, raw, parsed, recallModeForType(adapter.type))
         // Persist synchronously so ClusteredProductsSection (parallel Suspense
         // boundary, polls the DB) can see these listings before the response
         // is flushed.

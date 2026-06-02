@@ -21,13 +21,19 @@ Return ONLY a JSON object with these keys (omit any that aren't present in the q
   refinedQuery: string  // the product name with filters/price/brand stripped
   category: string?
   brand: string?
-  maxPriceMinor: number?  // cents; "under $80" -> 8000
-  minPriceMinor: number?  // cents
+  maxPriceMinor: number?  // price CEILING in cents
+  minPriceMinor: number?  // price FLOOR in cents
   features: string[]?  // e.g. ["wireless", "anc"]
 
-Rules:
+Price rules — direction matters, read carefully:
+- "under / below / less than / at most / up to / cheaper than $X" is a CEILING -> maxPriceMinor (X*100).
+- "above / over / more than / at least / starting at / minimum $X" is a FLOOR -> minPriceMinor (X*100).
+- "between $X and $Y" -> minPriceMinor (X*100) AND maxPriceMinor (Y*100).
+- NEVER emit maxPriceMinor for an "above/over" phrase. NEVER emit minPriceMinor for an "under/below" phrase.
+
+Other rules:
 - refinedQuery is always required and must read like a clean product name.
-- Strip phrases like "under $X", "below $X", "over $X", "with X", "for X".
+- Strip every price phrase (and "with X", "for X") from refinedQuery.
 - Strip retailer names (amazon, ebay, etc.) — those are handled elsewhere.
 - For brand: ONLY include if the user said a real brand name. Don't guess.
 - features: short lowercase tokens describing demanded attributes.
@@ -35,9 +41,11 @@ Rules:
 
 Examples:
   "wireless earbuds under $80" -> {"refinedQuery":"wireless earbuds","category":"earbuds","maxPriceMinor":8000,"features":["wireless"]}
+  "sunscreen above $10" -> {"refinedQuery":"sunscreen","category":"sunscreen","minPriceMinor":1000}
+  "headphones over $50" -> {"refinedQuery":"headphones","category":"headphones","minPriceMinor":5000}
+  "jacket between $40 and $90" -> {"refinedQuery":"jacket","category":"jacket","minPriceMinor":4000,"maxPriceMinor":9000}
   "sony noise cancelling headphones" -> {"refinedQuery":"sony noise cancelling headphones","category":"headphones","brand":"sony","features":["noise-cancelling"]}
   "running shoes" -> {"refinedQuery":"running shoes","category":"shoes","features":["running"]}
-  "fitbit air" -> {"refinedQuery":"fitbit air","brand":"fitbit"}
   "airpods pro" -> {"refinedQuery":"airpods pro","brand":"apple"}
 `
 
@@ -78,6 +86,37 @@ function validate(raw: unknown, fallbackQuery: string): ParsedQuery {
   return result
 }
 
+// Price thresholds are parsed deterministically rather than left to the LLM:
+// the fast model routinely flips "above $X" and "under $X". A regex gets the
+// direction right every time and works even when the LLM call fails entirely.
+function parsePriceBounds(query: string): { minPriceMinor?: number; maxPriceMinor?: number } {
+  const q = query.toLowerCase()
+  const amount = String.raw`\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:dollars?|usd|bucks?|\$)?`
+  const toMinor = (s: string) => Math.round(parseFloat(s) * 100)
+  const out: { minPriceMinor?: number; maxPriceMinor?: number } = {}
+
+  const between = q.match(new RegExp(String.raw`\bbetween\s+${amount}\s+(?:and|to|-)\s+${amount}`))
+  if (between) {
+    const a = toMinor(between[1])
+    const b = toMinor(between[2])
+    out.minPriceMinor = Math.min(a, b)
+    out.maxPriceMinor = Math.max(a, b)
+    return out
+  }
+
+  const ceiling = q.match(
+    new RegExp(String.raw`\b(?:under|below|less than|at most|up to|cheaper than|no more than)\s*${amount}`),
+  )
+  if (ceiling) out.maxPriceMinor = toMinor(ceiling[1])
+
+  const floor = q.match(
+    new RegExp(String.raw`\b(?:above|over|more than|at least|starting at|minimum|min)\s*${amount}`),
+  )
+  if (floor) out.minPriceMinor = toMinor(floor[1])
+
+  return out
+}
+
 /**
  * Parse a search query into structured filters. Caches per query string for
  * 1 hour (process-wide) and additionally per-request via React.cache. On
@@ -108,6 +147,12 @@ export const parseQuery = cache(async (rawQuery: string): Promise<ParsedQuery> =
     console.error('[query-parser]', err instanceof Error ? err.message : err)
     parsed = { refinedQuery: trimmed }
   }
+
+  // Price is authoritative from the deterministic parser, overriding whatever
+  // the LLM guessed (and surviving an LLM failure).
+  const bounds = parsePriceBounds(trimmed)
+  parsed.minPriceMinor = bounds.minPriceMinor
+  parsed.maxPriceMinor = bounds.maxPriceMinor
 
   memo.set(key, { value: parsed, expiresAt: Date.now() + CACHE_TTL_MS })
   return parsed

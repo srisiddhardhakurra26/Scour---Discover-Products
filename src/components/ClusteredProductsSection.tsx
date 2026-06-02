@@ -139,32 +139,37 @@ function rankForQuery(
     .map((r) => r.product)
 }
 
-export async function ClusteredProductsSection({ query }: { query: string }) {
-  // Pre-compute the query embedding + parse once; both are reused across
-  // every poll iteration below.
-  const parsed = query.trim() ? await parseQuery(query) : null
-  const matchQuery = parsed?.refinedQuery || query
-  const queryVec = parsed ? await embedQueryCached(matchQuery) : null
-
-  // Poll the DB. Adapters in parallel Suspense boundaries are persisting
-  // listings synchronously during their render; this loop waits for those
-  // writes (and any resulting cluster updates) to show up.
+// Poll the DB until clusters are visible or we hit the timeout. Adapters in
+// parallel Suspense boundaries persist their listings synchronously during
+// render, so this waits for those writes (and resulting clusters) to appear.
+// A plain async helper so the polling clock lives outside the component render.
+async function pollForClusters(
+  matchQuery: string,
+  queryVec: Float32Array | null,
+  parsed: Awaited<ReturnType<typeof parseQuery>> | null,
+): Promise<Candidate[]> {
   const deadline = Date.now() + POLL_TIMEOUT_MS
-  let visible: Candidate[] = []
   while (true) {
     const products = await fetchClusterCandidates()
     if (products.length > 0) {
       const ranked =
-        queryVec && parsed
-          ? rankForQuery(products, matchQuery, queryVec, parsed)
-          : products
-      visible = ranked.slice(0, 12)
-      if (visible.length > 0) break
+        queryVec && parsed ? rankForQuery(products, matchQuery, queryVec, parsed) : products
+      const visible = ranked.slice(0, 12)
+      if (visible.length > 0) return visible
     }
-    if (Date.now() >= deadline) break
+    if (Date.now() >= deadline) return []
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
   }
+}
 
+export async function ClusteredProductsSection({ query }: { query: string }) {
+  // Pre-compute the query embedding + parse once; both are reused across
+  // every poll iteration.
+  const parsed = query.trim() ? await parseQuery(query) : null
+  const matchQuery = parsed?.refinedQuery || query
+  const queryVec = parsed ? await embedQueryCached(matchQuery) : null
+
+  const visible = await pollForClusters(matchQuery, queryVec, parsed)
   if (visible.length === 0) return null
 
   const totalListings = visible.reduce((acc, p) => acc + p.listings.length, 0)

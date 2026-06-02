@@ -1,20 +1,27 @@
 import { after } from 'next/server'
 import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
-import { rankByRelevance } from '@/lib/relevance'
+import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
 import { ListingCard } from './ListingCard'
 import { CardRail } from './CardRail'
 
-export async function AdapterSection({
-  adapter,
-  query,
-  timeoutMs,
-}: {
-  adapter: Adapter
-  query: string
-  timeoutMs: number
-}) {
+type SectionData = {
+  kept: RankedListing[]
+  dropped: number
+  rawCount: number
+  elapsedMs: number
+}
+
+// Fetch + rank + persist for one adapter. A plain async helper (not a React
+// component) so the timing clock and the error-handling try/catch live outside
+// render — the component below just awaits this and renders. Returns null on
+// adapter error or when there's nothing to show.
+async function loadAdapterSection(
+  adapter: Adapter,
+  query: string,
+  timeoutMs: number,
+): Promise<SectionData | null> {
   const started = performance.now()
   try {
     const parsed = await parseQuery(query)
@@ -22,9 +29,9 @@ export async function AdapterSection({
     const rawListings = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
     if (rawListings.length === 0) return null
 
-    const ranked = await rankByRelevance(query, rawListings, parsed)
+    const ranked = await rankByRelevance(query, rawListings, parsed, recallModeForType(adapter.type))
 
-    // Persist synchronously (not via `after()`) so the ClusteredProductsSection,
+    // Persist synchronously (not via `after()`) so ClusteredProductsSection,
     // which renders in a parallel Suspense boundary and polls the DB, can see
     // these writes before the response is sent.
     try {
@@ -37,36 +44,52 @@ export async function AdapterSection({
       console.error(`[persist] ${adapter.label}:`, err)
     }
 
-    const elapsedMs = Math.round(performance.now() - started)
-
-    if (ranked.kept.length === 0) return null
-
-    const status =
-      ranked.dropped > 0
-        ? `${ranked.kept.length} of ${rawListings.length} · ${elapsedMs}ms`
-        : `${ranked.kept.length} result${ranked.kept.length === 1 ? '' : 's'} · ${elapsedMs}ms`
-
-    return (
-      <section className="flex flex-col gap-4">
-        <SectionHeader label={adapter.label} type={adapter.type} status={status} />
-        <CardRail itemMinWidth={210}>
-          {ranked.kept.map(({ listing }) => (
-            <div
-              key={`${adapter.id}-${listing.externalId}`}
-              className="w-[210px] shrink-0 snap-start"
-            >
-              <ListingCard listing={listing} retailerLabel={adapter.label} />
-            </div>
-          ))}
-        </CardRail>
-      </section>
-    )
+    return {
+      kept: ranked.kept,
+      dropped: ranked.dropped,
+      rawCount: rawListings.length,
+      elapsedMs: Math.round(performance.now() - started),
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error'
     after(() => recordAdapterError(adapter.id, message).catch(() => {}))
     console.error(`[adapter] ${adapter.label}: ${message}`)
     return null
   }
+}
+
+export async function AdapterSection({
+  adapter,
+  query,
+  timeoutMs,
+}: {
+  adapter: Adapter
+  query: string
+  timeoutMs: number
+}) {
+  const data = await loadAdapterSection(adapter, query, timeoutMs)
+  if (!data || data.kept.length === 0) return null
+
+  const status =
+    data.dropped > 0
+      ? `${data.kept.length} of ${data.rawCount} · ${data.elapsedMs}ms`
+      : `${data.kept.length} result${data.kept.length === 1 ? '' : 's'} · ${data.elapsedMs}ms`
+
+  return (
+    <section className="flex flex-col gap-4">
+      <SectionHeader label={adapter.label} type={adapter.type} status={status} />
+      <CardRail itemMinWidth={210}>
+        {data.kept.map(({ listing }) => (
+          <div
+            key={`${adapter.id}-${listing.externalId}`}
+            className="w-[210px] shrink-0 snap-start"
+          >
+            <ListingCard listing={listing} retailerLabel={adapter.label} />
+          </div>
+        ))}
+      </CardRail>
+    </section>
+  )
 }
 
 export function AdapterLoading({ adapter }: { adapter: Adapter }) {

@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio'
 import type { Adapter, NormalizedListing } from './types'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
 import { extractListings } from './generic-extract'
+import { diagnoseZeroResults } from './diagnose'
 import { repairGenericAdapter } from '@/lib/llm/adapter-repair'
 import { renderPage, looksLikeJsShell } from '@/lib/browser'
 import { prisma } from '@/lib/db'
@@ -10,7 +11,7 @@ const REALISTIC_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
 
 /** Fetch (or render) the search-results HTML for a config + query. */
-async function loadSearchHtml(
+export async function loadSearchHtml(
   config: GenericHtmlConfig,
   query: string,
   domain: string,
@@ -100,9 +101,14 @@ export function createGenericHtmlAdapter(
       const results = extractListings(html, config, domain, label)
       if (results.length > 0) return results
 
-      // Zero results usually means the site changed its markup and the stored
-      // selectors are stale. Self-heal: run the repair agent once, persist the
-      // fix, and retry extraction with the corrected config in this same search.
+      // Zero results has three very different causes; only stale selectors are
+      // worth the expensive repair agent. Repairing against a bot-challenge page
+      // or a genuinely empty result set wastes a render + LLM round and can
+      // corrupt a working config by fitting selectors to junk.
+      if (diagnoseZeroResults(html, config) !== 'stale') return results
+
+      // Self-heal: run the repair agent once, persist the fix, and retry
+      // extraction with the corrected config in this same search.
       const fixed = await autoRepair(id, domain, config, query)
       if (!fixed) return results
 

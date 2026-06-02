@@ -72,3 +72,38 @@ export function looksLikeJsShell(html: string): boolean {
   const hasProductIsh = /\b(price|product|cart|add to)\b/i.test(html)
   return hasReactRoot && !hasProductIsh
 }
+
+const BLOCK_MARKERS = [
+  'captcha',
+  'are you a robot',
+  'verify you are human',
+  'verify you are a human',
+  'access denied',
+  'access to this page has been denied',
+  'unusual traffic',
+  'detected unusual activity',
+  'cf-browser-verification',
+  'cf-challenge',
+  '/cdn-cgi/challenge-platform',
+  'just a moment...',
+  'attention required',
+  'px-captcha',
+  'perimeterx',
+  'request blocked',
+  'pardon our interruption',
+  'enable javascript and cookies to continue',
+  'ddos protection by',
+  'checking your browser before',
+]
+
+/**
+ * Heuristic: is this HTML a bot-challenge / access-denied interstitial rather
+ * than real content? Used to avoid firing the (expensive) repair agent — and
+ * worse, fitting selectors to junk — when a source is simply blocking us.
+ * Conservative: matches well-known markers from Cloudflare, PerimeterX, Akamai,
+ * and explicit captcha / "verify you're human" prompts.
+ */
+export function looksLikeBlockPage(html: string): boolean {
+  const h = html.toLowerCase()
+  return BLOCK_MARKERS.some((m) => h.includes(m))
+}

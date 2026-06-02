@@ -51,6 +51,23 @@ export type RankResult = {
   dropped: number
 }
 
+export type RecallMode = 'strict' | 'high'
+
+// Discovery feeds (Reddit, Slickdeals RSS) return loosely-related items, so the
+// strict embedding gate below earns its keep. Direct product searches (Shopify,
+// Nike/generic-html, Amazon, eBay, …) already matched the query on the
+// retailer's side — re-running a strict semantic filter there discards good
+// results: "Air Jordan 1" scores ~0.24 against the word "shoes" yet is exactly
+// what the user asked Nike for. For those we rank by score but only drop items
+// that look clearly off-topic (e.g. a catalog dump from a store that ignores
+// the query).
+const HIGH_RECALL_FLOOR = 0.15
+const FEED_TYPES = new Set(['reddit', 'rss'])
+
+export function recallModeForType(type: string): RecallMode {
+  return FEED_TYPES.has(type) ? 'strict' : 'high'
+}
+
 function withinPriceWindow(priceMinor: number, parsed?: ParsedQuery): boolean {
   if (!parsed) return true
   if (priceMinor <= 0) return true // no price extracted; don't drop
@@ -63,6 +80,7 @@ export async function rankByRelevance(
   query: string,
   listings: NormalizedListing[],
   parsed?: ParsedQuery,
+  mode: RecallMode = 'strict',
 ): Promise<RankResult> {
   if (listings.length === 0) return { kept: [], dropped: 0 }
   // Use the LLM-refined query for semantic + token matching when available
@@ -93,6 +111,10 @@ export async function rankByRelevance(
   const kept = scored
     .filter((s) => {
       if (!withinPriceWindow(s.listing.priceMinor, parsed)) return false
+      if (mode === 'high') {
+        // Retailer already matched the query; only drop clearly off-topic noise.
+        return s.score >= HIGH_RECALL_FLOOR
+      }
       if (s.score < floor) return false
       if (s.score >= trust) return true
       return hasTokenOverlap(matchQuery, s.listing.title)

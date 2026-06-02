@@ -4,6 +4,7 @@ import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
 import { rerankCandidates } from '@/lib/llm/rerank'
+import { withHardTimeout } from '@/lib/timeout'
 import { formatPrice } from '@/lib/format'
 
 // LLM rerank score below which a candidate is judged off-intent and dropped.
@@ -32,7 +33,13 @@ export async function AllResultsView({
   const results = await Promise.all(
     adapters.map(async (adapter) => {
       try {
-        const raw = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
+        // Hard ceiling on top of the AbortSignal: some adapters don't honor
+        // abort and would otherwise hang the whole streamed page.
+        const raw = await withHardTimeout(
+          adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
+          timeoutMs + 1500,
+          `${adapter.label} search`,
+        )
         const ranked = await rankByRelevance(query, raw, parsed, recallModeForType(adapter.type))
         // Persist synchronously so ClusteredProductsSection (parallel Suspense
         // boundary, polls the DB) can see these listings before the response

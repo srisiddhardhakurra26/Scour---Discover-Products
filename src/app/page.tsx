@@ -7,6 +7,10 @@ import { BrandMark } from '@/components/Brand'
 import { FeaturedClusters } from '@/components/FeaturedClusters'
 import { getAdapters } from '@/lib/adapters/registry'
 
+// Reads the DB at render time, so it can't be statically prerendered at build
+// (there's no database during the image build). Render on each request.
+export const dynamic = 'force-dynamic'
+
 const TYPE_BADGE: Record<string, string> = {
   shopify: 'bg-emerald-400/10 text-emerald-300',
   woocommerce: 'bg-violet-400/10 text-violet-300',

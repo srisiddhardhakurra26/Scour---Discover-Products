@@ -3,6 +3,7 @@ import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
+import { withHardTimeout } from '@/lib/timeout'
 import { ListingCard } from './ListingCard'
 import { CardRail } from './CardRail'
 
@@ -26,7 +27,13 @@ async function loadAdapterSection(
   try {
     const parsed = await parseQuery(query)
     const searchQuery = parsed.refinedQuery || query
-    const rawListings = await adapter.search(searchQuery, AbortSignal.timeout(timeoutMs))
+    // Hard ceiling on top of the AbortSignal: some adapters don't honor abort
+    // and would otherwise hang this section (and the parallel cluster poll).
+    const rawListings = await withHardTimeout(
+      adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
+      timeoutMs + 1500,
+      `${adapter.label} search`,
+    )
     if (rawListings.length === 0) return null
 
     const ranked = await rankByRelevance(query, rawListings, parsed, recallModeForType(adapter.type))

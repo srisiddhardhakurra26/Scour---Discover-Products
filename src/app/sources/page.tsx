@@ -4,6 +4,10 @@ import { timeAgo } from '@/lib/format'
 import { AddSourceForm } from './AddSourceForm'
 import { RetailerRow } from './RetailerRow'
 
+// Reads the DB at render time, so it can't be statically prerendered at build
+// (there's no database during the image build). Render on each request.
+export const dynamic = 'force-dynamic'
+
 // Pull the search-URL template out of a generic-html config for an at-a-glance
 // summary in the console. Best-effort: a corrupt config just shows nothing.
 function configSummary(type: string, config: string | null): string | null {

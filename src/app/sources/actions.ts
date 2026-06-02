@@ -5,6 +5,8 @@ import { prisma } from '@/lib/db'
 import { onboardSource } from '@/lib/llm/source-onboarder'
 import { repairGenericAdapter } from '@/lib/llm/adapter-repair'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
+import { getAdapterById } from '@/lib/adapters/registry'
+import { formatPrice } from '@/lib/format'
 
 const REALISTIC_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
@@ -154,6 +156,52 @@ export async function removeRetailer(id: string) {
   await prisma.retailer.delete({ where: { id } })
   revalidatePath('/sources')
   revalidatePath('/')
+}
+
+export type DiagnoseResult = {
+  ok: boolean
+  count?: number
+  samples?: Array<{ title: string; price: string; url: string }>
+  elapsedMs?: number
+  error?: string
+}
+
+// Run a source live against a sample query and report what came back, without
+// persisting anything. This is the "test" half of the repair console: it lets
+// the user see whether a source is healthy (and how slow it is) before deciding
+// to repair. Uses a generous timeout — Playwright-backed sources are slow, and
+// this is a manual diagnostic, not the latency-sensitive search path.
+export async function diagnoseRetailer(
+  id: string,
+  sampleQuery: string,
+): Promise<DiagnoseResult> {
+  const query = sampleQuery.trim()
+  if (!query) return { ok: false, error: 'Provide a sample search query.' }
+
+  const adapter = await getAdapterById(id)
+  if (!adapter) return { ok: false, error: 'Source could not be built (missing or invalid config).' }
+
+  const started = performance.now()
+  try {
+    const listings = await adapter.search(query, AbortSignal.timeout(20_000))
+    const elapsedMs = Math.round(performance.now() - started)
+    return {
+      ok: true,
+      count: listings.length,
+      elapsedMs,
+      samples: listings.slice(0, 3).map((l) => ({
+        title: l.title,
+        price: l.priceMinor > 0 ? formatPrice(l.priceMinor, l.currency) : '—',
+        url: l.url,
+      })),
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      elapsedMs: Math.round(performance.now() - started),
+      error: err instanceof Error ? err.message : 'unknown error',
+    }
+  }
 }
 
 export async function repairRetailer(

@@ -3,7 +3,11 @@ import type { Adapter } from '@/lib/adapters/types'
 import { persistListings, recordAdapterError } from '@/lib/persist'
 import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
+import { rerankCandidates } from '@/lib/llm/rerank'
 import { formatPrice } from '@/lib/format'
+
+// LLM rerank score below which a candidate is judged off-intent and dropped.
+const RERANK_KEEP = 0.45
 import { ListingCard } from './ListingCard'
 import type { SortKey } from './SearchToolbar'
 
@@ -51,9 +55,40 @@ export async function AllResultsView({
     }),
   )
 
-  const all: TaggedListing[] = results.flatMap(({ adapter, kept }) =>
+  const pool: TaggedListing[] = results.flatMap(({ adapter, kept }) =>
     kept.map((k) => ({ ...k, adapter })),
   )
+
+  // Precision pass: an LLM reranks the candidate pool by true intent — a
+  // Chelsea boot matches "shoes"; a sneaker does NOT match "leather boots".
+  // Embeddings gave recall (and, with catalog-dump Shopify sources, a long
+  // low-relevance tail — a sneaker brand's whole catalog for a "boots" query).
+  // Cap to the strongest candidates, judge exactly that displayed set, and cut
+  // the tail. Time-boxed inside rerankCandidates; on failure we fall back to
+  // embedding order (still capped).
+  const DISPLAY_CAP = 60
+  let all = [...pool].sort((a, b) => b.score - a.score).slice(0, DISPLAY_CAP)
+  if (all.length > 1) {
+    const scores = await rerankCandidates(
+      query,
+      parsed,
+      all.map((t) => ({
+        id: `${t.adapter.id}-${t.listing.externalId}`,
+        title: t.listing.title,
+        brand: t.listing.sellerName,
+        priceMinor: t.listing.priceMinor,
+        currency: t.listing.currency,
+      })),
+    )
+    if (scores) {
+      all = all.flatMap((t) => {
+        const s = scores.get(`${t.adapter.id}-${t.listing.externalId}`)
+        if (s === undefined) return [t] // judge didn't score it → keep, don't guess
+        if (s < RERANK_KEEP) return [] // judged off-intent → drop
+        return [{ ...t, score: s }] // judged relevant → adopt the sharper score
+      })
+    }
+  }
 
   if (sort === 'price-asc') {
     all.sort((a, b) => {

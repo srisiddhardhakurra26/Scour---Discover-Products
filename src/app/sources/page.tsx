@@ -1,7 +1,20 @@
 import { prisma } from '@/lib/db'
 import { Header } from '@/components/Header'
+import { timeAgo } from '@/lib/format'
 import { AddSourceForm } from './AddSourceForm'
 import { RetailerRow } from './RetailerRow'
+
+// Pull the search-URL template out of a generic-html config for an at-a-glance
+// summary in the console. Best-effort: a corrupt config just shows nothing.
+function configSummary(type: string, config: string | null): string | null {
+  if (type !== 'generic-html' || !config) return null
+  try {
+    const c = JSON.parse(config) as { searchUrlTemplate?: string }
+    return typeof c.searchUrlTemplate === 'string' ? c.searchUrlTemplate : null
+  } catch {
+    return null
+  }
+}
 
 const TYPE_ORDER = [
   'shopify',
@@ -87,6 +100,9 @@ export default async function SourcesPage() {
                       label={r.label ?? r.identifier}
                       identifier={r.identifier}
                       enabled={r.enabled}
+                      lastFetchedLabel={r.lastFetchedAt ? timeAgo(r.lastFetchedAt) : null}
+                      lastError={r.lastError}
+                      configSummary={configSummary(r.type, r.config)}
                     />
                   ))}
                 </ul>

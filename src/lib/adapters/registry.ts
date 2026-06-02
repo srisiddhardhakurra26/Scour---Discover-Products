@@ -70,3 +70,11 @@ export async function getAdapters(): Promise<Adapter[]> {
     return a ? [a] : []
   })
 }
+
+// Build a single adapter by retailer id regardless of its enabled flag. Used by
+// the repair console to test/diagnose a source on demand without going through
+// the full enabled fan-out.
+export async function getAdapterById(id: string): Promise<Adapter | null> {
+  const r = await prisma.retailer.findUnique({ where: { id } })
+  return r ? buildAdapter(r) : null
+}

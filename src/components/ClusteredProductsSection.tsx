@@ -2,7 +2,11 @@ import { prisma } from '@/lib/db'
 import { formatPrice } from '@/lib/format'
 import { bytesToFloat, dotProduct, embedQueryCached, EMBEDDING_DIM } from '@/lib/embeddings'
 import { parseQuery } from '@/lib/llm/query-parser'
+import { rerankCandidates } from '@/lib/llm/rerank'
+import { minPriceTrend } from '@/lib/price-history'
 import { Sparkline } from './Sparkline'
+import { SaveButton } from './SaveButton'
+import { CommunityIntel } from './CommunityIntel'
 import { CardRail } from './CardRail'
 
 // Clusters whose best listing scores below this against the query are dropped.
@@ -172,7 +176,39 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
   const visible = await pollForClusters(matchQuery, queryVec, parsed)
   if (visible.length === 0) return null
 
-  const totalListings = visible.reduce((acc, p) => acc + p.listings.length, 0)
+  // Precision rerank of the clustered products by true intent (see rerank.ts).
+  // Falls back to embedding order if the judge is unavailable.
+  let products = visible
+  if (parsed && visible.length > 1) {
+    const scores = await rerankCandidates(
+      query,
+      parsed,
+      visible.map((p) => ({
+        id: p.id,
+        title: p.canonicalTitle,
+        brand: p.brand,
+        priceMinor: p.listings[0]?.priceMinor,
+        currency: p.listings[0]?.currency,
+      })),
+    )
+    if (scores) {
+      products = visible
+        .map((p) => ({ p, s: scores.get(p.id) }))
+        .filter(({ s }) => s === undefined || s >= 0.45)
+        .sort((a, b) => (b.s ?? 0) - (a.s ?? 0))
+        .map(({ p }) => p)
+    }
+  }
+  if (products.length === 0) return null
+
+  const totalListings = products.reduce((acc, p) => acc + p.listings.length, 0)
+
+  // Which of these are already on the wishlist, so the heart renders filled.
+  const savedRows = await prisma.savedProduct.findMany({
+    where: { productId: { in: products.map((p) => p.id) } },
+    select: { productId: true },
+  })
+  const savedSet = new Set(savedRows.map((r) => r.productId))
 
   return (
     <section className="flex flex-col gap-4">
@@ -186,13 +222,13 @@ export async function ClusteredProductsSection({ query }: { query: string }) {
           </span>
         </div>
         <span className="font-mono text-[11px] tabular-nums text-fg-subtle">
-          {visible.length} cluster{visible.length === 1 ? '' : 's'} · {totalListings} listings
+          {products.length} cluster{products.length === 1 ? '' : 's'} · {totalListings} listings
         </span>
       </div>
       <CardRail itemMinWidth={360} scrollByCount={2}>
-        {visible.map((p) => (
+        {products.map((p) => (
           <div key={p.id} className="w-[360px] shrink-0 snap-start">
-            <ProductCard product={p} />
+            <ProductCard product={p} saved={savedSet.has(p.id)} />
           </div>
         ))}
       </CardRail>
@@ -215,7 +251,7 @@ type ProductRow = {
   }>
 }
 
-function ProductCard({ product }: { product: ProductRow }) {
+function ProductCard({ product, saved }: { product: ProductRow; saved: boolean }) {
   // Dedupe by retailer: keep cheapest listing per retailer.
   // "One from r/buildapcsales is enough." Same applies to Slickdeals, Allbirds, etc.
   const dedupedMap = new Map<string, ProductRow['listings'][number]>()
@@ -234,18 +270,8 @@ function ProductCard({ product }: { product: ProductRow }) {
       ? Math.round(((highest.priceMinor - lowest.priceMinor) / highest.priceMinor) * 100)
       : 0
 
-  // Build aggregated min-price-over-time across all listings
-  const minByTime = new Map<number, number>()
-  for (const l of product.listings) {
-    for (const obs of l.prices) {
-      const bucket = Math.floor(obs.capturedAt.getTime() / (1000 * 60 * 60)) * (1000 * 60 * 60)
-      const cur = minByTime.get(bucket)
-      if (cur === undefined || obs.priceMinor < cur) minByTime.set(bucket, obs.priceMinor)
-    }
-  }
-  const trend = [...minByTime.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, v]) => v)
+  // Aggregated lowest-price-over-time across all listings (see price-history.ts).
+  const trend = minPriceTrend(product.listings).map((p) => p.priceMinor)
 
   const visibleListings = deduped.slice(0, 4)
   const overflow = hiddenCount + Math.max(0, deduped.length - visibleListings.length)
@@ -283,11 +309,14 @@ function ProductCard({ product }: { product: ProductRow }) {
           >
             {product.canonicalTitle}
           </a>
-          {spread > 0 && (
-            <span className="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-accent-strong">
-              –{spread}%
-            </span>
-          )}
+          <div className="flex shrink-0 items-center gap-1.5">
+            {spread > 0 && (
+              <span className="rounded bg-accent-soft px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-accent-strong">
+                –{spread}%
+              </span>
+            )}
+            <SaveButton productId={product.id} initialSaved={saved} />
+          </div>
         </div>
 
         <ul className="flex flex-col">
@@ -326,6 +355,8 @@ function ProductCard({ product }: { product: ProductRow }) {
             <Sparkline values={trend} width={70} height={18} />
           </div>
         )}
+
+        <CommunityIntel productTitle={product.canonicalTitle} />
       </div>
     </div>
   )

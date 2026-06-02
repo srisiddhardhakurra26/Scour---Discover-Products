@@ -130,3 +130,135 @@ export async function generateJson(
   }
   throw new Error(`all LLM providers failed: ${errors.join(' | ')}`)
 }
+
+// --- Conversational text (Copilot) ---------------------------------------
+// generateJson is single-shot JSON; the Copilot needs multi-turn, streamed,
+// free-text output. These helpers stay separate so the JSON agents are
+// unaffected, and they keep the same Groq-first / Gemini-fallback shape.
+
+export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
+
+type ChatOptions = { tier: 'fast' | 'reasoning'; maxTokens?: number }
+
+async function* streamGroqText(
+  messages: ChatMessage[],
+  opts: ChatOptions,
+  signal: AbortSignal,
+): AsyncGenerator<string> {
+  const key = process.env.GROQ_API_KEY
+  if (!key) throw new LlmError('groq', null, 'GROQ_API_KEY not set')
+
+  const model =
+    opts.tier === 'reasoning' ? 'llama-3.3-70b-versatile' : 'llama-3.1-8b-instant'
+
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    signal,
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      temperature: 0.3,
+      max_tokens: opts.maxTokens ?? 700,
+      stream: true,
+      messages,
+    }),
+  })
+  // Any failure here happens before we yield, so callers can safely fall back.
+  if (!res.ok || !res.body) {
+    const body = await res.text().catch(() => '')
+    throw new LlmError('groq', res.status, `${res.status}: ${body.slice(0, 200)}`)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const data = trimmed.slice(5).trim()
+      if (data === '[DONE]') return
+      try {
+        const json = JSON.parse(data) as {
+          choices?: Array<{ delta?: { content?: string } }>
+        }
+        const delta = json.choices?.[0]?.delta?.content
+        if (delta) yield delta
+      } catch {
+        // keep-alive or split frame — ignore
+      }
+    }
+  }
+}
+
+async function geminiText(
+  messages: ChatMessage[],
+  opts: ChatOptions,
+  signal: AbortSignal,
+): Promise<string> {
+  const key = process.env.GEMINI_API_KEY
+  if (!key) throw new LlmError('gemini', null, 'GEMINI_API_KEY not set')
+
+  const model = opts.tier === 'reasoning' ? 'gemini-2.5-flash' : 'gemini-2.5-flash-lite'
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n')
+  const contents = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }))
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`
+  const res = await fetch(url, {
+    signal,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: system ? { role: 'system', parts: [{ text: system }] } : undefined,
+      contents,
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: opts.maxTokens ?? 700,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    }),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new LlmError('gemini', res.status, `${res.status}: ${body.slice(0, 200)}`)
+  }
+  const data = (await res.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+  }
+  const content = data.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!content) throw new LlmError('gemini', null, 'empty response')
+  return content
+}
+
+/**
+ * Stream a plain-text chat completion as a sequence of text deltas. Tries Groq
+ * (true token streaming); if Groq fails before any output, falls back to a
+ * single-shot Gemini response yielded as one chunk. Throws only if both
+ * providers fail — the Copilot route turns that into a graceful message.
+ */
+export async function* streamText(
+  messages: ChatMessage[],
+  opts: ChatOptions = { tier: 'fast' },
+  signal: AbortSignal = AbortSignal.timeout(30_000),
+): AsyncGenerator<string> {
+  try {
+    yield* streamGroqText(messages, opts, signal)
+    return
+  } catch (err) {
+    console.error('[copilot] groq stream failed, falling back to gemini:', err)
+  }
+  yield await geminiText(messages, opts, signal)
+}

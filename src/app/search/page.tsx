@@ -8,6 +8,7 @@ import {
 } from '@/components/ClusteredProductsSection'
 import { AllResultsView, AllResultsLoading } from '@/components/AllResultsView'
 import { SearchToolbar, type SortKey, type ViewMode } from '@/components/SearchToolbar'
+import { Copilot } from '@/components/Copilot'
 import { getAdapters, ADAPTER_TIMEOUT_MS } from '@/lib/adapters/registry'
 
 export default async function SearchPage({
@@ -90,6 +91,8 @@ export default async function SearchPage({
           </div>
         )}
       </main>
+
+      {query && <Copilot query={query} />}
     </>
   )
 }

@@ -38,4 +38,4 @@ jobs:
       - name: Build & restart
         run: |
           ssh -i ~/.ssh/id_deploy "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
-            "cd ~/scour && sudo docker compose up -d --build && sudo docker image prune -f"
+            "cd ~/scour && sudo docker compose up -d --build && sudo docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile && sudo docker image prune -f"

@@ -63,7 +63,11 @@ export default async function SearchPage({
         ) : (
           <div className="flex flex-col gap-10">
             <Suspense fallback={<ClusteredProductsLoading />}>
-              <ClusteredProductsSection query={query} />
+              <ClusteredProductsSection
+                query={query}
+                adapters={activeAdapters}
+                timeoutMs={ADAPTER_TIMEOUT_MS}
+              />
             </Suspense>
 
             {view === 'all' ? (

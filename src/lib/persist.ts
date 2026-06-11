@@ -58,6 +58,8 @@ export async function persistListings(
       reviewCount: l.reviewCount,
       reviewAvg: l.reviewAvg,
       raw: l.raw ? JSON.stringify(l.raw) : undefined,
+      detailsText: l.detailsText,
+      lastSeenAt: new Date(),
     }
 
     const listing = await prisma.listing.upsert({

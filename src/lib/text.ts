@@ -86,6 +86,50 @@ export function normalizeTitle(raw: string): string {
   return s
 }
 
+/** Lowercased query tokens (>= 3 chars) required to appear in a title. */
+export function meaningfulTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length >= 3)
+}
+
+/** Does a query token appear in a (lowercased) title, allowing plural→singular? */
+export function tokenMatchesTitle(token: string, titleLower: string): boolean {
+  if (titleLower.includes(token)) return true
+  if (token.endsWith('s') && token.length > 3 && titleLower.includes(token.slice(0, -1))) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Token-overlap guard for a single title. For a single-word query, the token
+ * (or its singular form) must appear in the title. For a multi-word query,
+ * *every* meaningful (>= 3 char) token must appear — otherwise "fitbit air"
+ * matches any title containing "air" (e.g. "AirPods") on embedding similarity
+ * alone.
+ */
+export function hasTokenOverlap(query: string, title: string): boolean {
+  const qTokens = meaningfulTokens(query)
+  if (qTokens.length === 0) return true
+  const tLower = title.toLowerCase()
+  return qTokens.every((t) => tokenMatchesTitle(t, tLower))
+}
+
+/**
+ * Same guard across a cluster: every meaningful token must appear in at least
+ * one listing title (not necessarily the same one). Stops "fitbit air" from
+ * surfacing AirPods clusters because "air" alone happens to be semantically
+ * close.
+ */
+export function clusterHasTokenOverlap(query: string, titles: string[]): boolean {
+  const qTokens = meaningfulTokens(query)
+  if (qTokens.length === 0) return true
+  const lowered = titles.map((t) => t.toLowerCase())
+  return qTokens.every((tok) => lowered.some((title) => tokenMatchesTitle(tok, title)))
+}
+
 /** Extract a 10-char Amazon ASIN from a URL (anywhere — /dp/, /gp/product/, raw, etc.) */
 export function extractASIN(url: string | undefined): string | null {
   if (!url) return null

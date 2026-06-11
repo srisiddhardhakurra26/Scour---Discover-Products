@@ -1,14 +1,15 @@
-import { after } from 'next/server'
 import type { Adapter } from '@/lib/adapters/types'
-import { persistListings, recordAdapterError } from '@/lib/persist'
-import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
+import { CATALOG_DUMP_TYPES, type RankedListing } from '@/lib/relevance'
+import { searchAllAdapters } from '@/lib/fanout'
 import { parseQuery } from '@/lib/llm/query-parser'
-import { rerankCandidates } from '@/lib/llm/rerank'
-import { withHardTimeout } from '@/lib/timeout'
+import { hasAttributeEvidence, rerankCandidates } from '@/lib/llm/rerank'
 import { formatPrice } from '@/lib/format'
 
 // LLM rerank score below which a candidate is judged off-intent and dropped.
 const RERANK_KEEP = 0.45
+// When the judge drops every candidate, show embedding matches at or above
+// this score instead of an empty page (~0.35 = same product category).
+const EMPTY_JUDGE_FALLBACK_FLOOR = 0.35
 import { ListingCard } from './ListingCard'
 import type { SortKey } from './SearchToolbar'
 
@@ -26,41 +27,10 @@ export async function AllResultsView({
   timeoutMs: number
 }) {
   const parsed = await parseQuery(query)
-  const searchQuery = parsed.refinedQuery || query
 
-  // Fan out in parallel. Persistence is awaited inline (not via after()) so
-  // ClusteredProductsSection's DB poll can see these writes.
-  const results = await Promise.all(
-    adapters.map(async (adapter) => {
-      try {
-        // Hard ceiling on top of the AbortSignal: some adapters don't honor
-        // abort and would otherwise hang the whole streamed page.
-        const raw = await withHardTimeout(
-          adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
-          timeoutMs + 1500,
-          `${adapter.label} search`,
-        )
-        const ranked = await rankByRelevance(query, raw, parsed, recallModeForType(adapter.type))
-        // Persist synchronously so ClusteredProductsSection (parallel Suspense
-        // boundary, polls the DB) can see these listings before the response
-        // is flushed.
-        try {
-          await persistListings(
-            adapter.id,
-            ranked.kept.map((r) => r.listing),
-            ranked.kept.map((r) => r.embedding),
-          )
-        } catch (err) {
-          console.error(`[persist] ${adapter.label}:`, err)
-        }
-        return { adapter, kept: ranked.kept }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'unknown error'
-        after(() => recordAdapterError(adapter.id, msg).catch(() => {}))
-        return { adapter, kept: [] as RankedListing[] }
-      }
-    }),
-  )
+  // Shared fan-out: search + rank + persist happen once per adapter per
+  // request (see fanout.ts); other sections await the same promises.
+  const results = await searchAllAdapters(adapters, query, timeoutMs)
 
   const pool: TaggedListing[] = results.flatMap(({ adapter, kept }) =>
     kept.map((k) => ({ ...k, adapter })),
@@ -87,15 +57,40 @@ export async function AllResultsView({
         brand: t.listing.sellerName,
         priceMinor: t.listing.priceMinor,
         currency: t.listing.currency,
+        details: t.listing.detailsText,
       })),
     )
     if (scores) {
-      all = all.flatMap((t) => {
+      const judged = all.flatMap((t) => {
         const s = scores.get(`${t.adapter.id}-${t.listing.externalId}`)
         if (s === undefined) return [t] // judge didn't score it → keep, don't guess
         if (s < RERANK_KEEP) return [] // judged off-intent → drop
         return [{ ...t, score: s }] // judged relevant → adopt the sharper score
       })
+      // Judge rejected EVERYTHING. Respect rejections backed by evidence
+      // (details said wool/canvas, shopper wants leather — hiding those is
+      // CORRECT), and resurrect only evidence-blind candidates (title-only
+      // sources like generic-html) in the confident embedding band. Without
+      // the evidence check this showed Allbirds wool for "leather shoes".
+      all =
+        judged.length > 0
+          ? judged
+          : all.filter(
+              (t) =>
+                !hasAttributeEvidence(t.listing.detailsText) &&
+                t.score >= EMPTY_JUDGE_FALLBACK_FLOOR,
+            )
+    } else {
+      // Judge unavailable (rate limit/outage). Marketplace items already
+      // matched the query server-side — keep them in embedding order (the
+      // tuned LLM-down behavior). Catalog-dump items did NOT (the store
+      // ignored the query), so raw embedding order shows the catalog's tail;
+      // keep only the confident same-category band for those.
+      all = all.filter(
+        (t) =>
+          !CATALOG_DUMP_TYPES.has(t.adapter.type) ||
+          t.score >= EMPTY_JUDGE_FALLBACK_FLOOR,
+      )
     }
   }
 

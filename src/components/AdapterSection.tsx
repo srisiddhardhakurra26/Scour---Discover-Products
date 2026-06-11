@@ -1,101 +1,94 @@
-import { after } from 'next/server'
 import type { Adapter } from '@/lib/adapters/types'
-import { persistListings, recordAdapterError } from '@/lib/persist'
-import { rankByRelevance, recallModeForType, type RankedListing } from '@/lib/relevance'
+import { CATALOG_DUMP_TYPES, type RankedListing } from '@/lib/relevance'
+import { searchAdapter } from '@/lib/fanout'
 import { parseQuery } from '@/lib/llm/query-parser'
-import { rerankCandidates } from '@/lib/llm/rerank'
-import { withHardTimeout } from '@/lib/timeout'
+import { hasAttributeEvidence, rerankCandidates } from '@/lib/llm/rerank'
 import { ListingCard } from './ListingCard'
 import { CardRail } from './CardRail'
 
-// Precision rerank for the by-source view (mirrors AllResultsView). Catalog-dump
-// sources (Shopify/Woo return the whole catalog, query ignored) otherwise show
-// off-intent items here — e.g. a shoe store listing shoes for a "backpack" query.
+// Precision rerank for the by-source view — but ONLY for catalog-dump sources
+// (Shopify/Woo return the whole catalog, query ignored), which otherwise show
+// off-intent items here. Marketplace/feed adapters already matched the query
+// server-side; judging their sections too burned ~10 LLM calls per page view,
+// blowing the free-tier rate limit so EVERY section fell back to raw
+// embedding order — whole catalogs and off-material items on the page.
 const RERANK_KEEP = 0.45
 const RERANK_DISPLAY_CAP = 40
+// When the judge drops every candidate, show embedding matches at or above
+// this score instead of an empty section (~0.35 = same product category).
+const EMPTY_JUDGE_FALLBACK_FLOOR = 0.35
 
 type SectionData = {
   kept: RankedListing[]
   dropped: number
   rawCount: number
   elapsedMs: number
+  fromCache: boolean
 }
 
-// Fetch + rank + persist for one adapter. A plain async helper (not a React
-// component) so the timing clock and the error-handling try/catch live outside
-// render — the component below just awaits this and renders. Returns null on
-// adapter error or when there's nothing to show.
+// Rank + rerank for display in one source section. The actual fetch/persist
+// runs through the shared per-request fan-out (fanout.ts), so this section,
+// AllResultsView, and the clusters section all see the same adapter results.
 async function loadAdapterSection(
   adapter: Adapter,
   query: string,
   timeoutMs: number,
 ): Promise<SectionData | null> {
-  const started = performance.now()
-  try {
-    const parsed = await parseQuery(query)
-    const searchQuery = parsed.refinedQuery || query
-    // Hard ceiling on top of the AbortSignal: some adapters don't honor abort
-    // and would otherwise hang this section (and the parallel cluster poll).
-    const rawListings = await withHardTimeout(
-      adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
-      timeoutMs + 1500,
-      `${adapter.label} search`,
+  const result = await searchAdapter(adapter, query, timeoutMs)
+  if (result.failed || result.kept.length === 0) return null
+
+  const parsed = await parseQuery(query)
+
+  // Precision pass before display: judge true intent and drop off-target
+  // catalog items. Catalog-dump sources only — see RERANK_KEEP comment.
+  let display = result.kept.slice(0, RERANK_DISPLAY_CAP)
+  if (display.length > 1 && CATALOG_DUMP_TYPES.has(adapter.type)) {
+    const scores = await rerankCandidates(
+      query,
+      parsed,
+      display.map((r) => ({
+        id: r.listing.externalId,
+        title: r.listing.title,
+        brand: r.listing.sellerName,
+        priceMinor: r.listing.priceMinor,
+        currency: r.listing.currency,
+        details: r.listing.detailsText,
+      })),
     )
-    if (rawListings.length === 0) return null
-
-    const ranked = await rankByRelevance(query, rawListings, parsed, recallModeForType(adapter.type))
-
-    // Persist the full ranked set (not via `after()`) so ClusteredProductsSection,
-    // which renders in a parallel Suspense boundary and polls the DB, can see
-    // these writes before the response is sent. Clustering does its own filtering.
-    try {
-      await persistListings(
-        adapter.id,
-        ranked.kept.map((r) => r.listing),
-        ranked.kept.map((r) => r.embedding),
-      )
-    } catch (err) {
-      console.error(`[persist] ${adapter.label}:`, err)
+    if (scores) {
+      const judged = display
+        .flatMap((r) => {
+          const s = scores.get(r.listing.externalId)
+          if (s === undefined) return [r]
+          if (s < RERANK_KEEP) return []
+          return [{ ...r, score: s }]
+        })
+        .sort((a, b) => b.score - a.score)
+      // Judge rejected everything — resurrect only evidence-blind candidates
+      // in the confident embedding band (see AllResultsView for rationale);
+      // evidence-backed rejections stand and the section hides honestly.
+      display =
+        judged.length > 0
+          ? judged
+          : display.filter(
+              (r) =>
+                !hasAttributeEvidence(r.listing.detailsText) &&
+                r.score >= EMPTY_JUDGE_FALLBACK_FLOOR,
+            )
+    } else {
+      // Judge unavailable (rate limit/outage). A catalog dump shown in raw
+      // embedding order is the whole store's tail; keep only the confident
+      // same-category band until the judge is back.
+      display = display.filter((r) => r.score >= EMPTY_JUDGE_FALLBACK_FLOOR)
     }
+  }
 
-    // Precision pass before display: judge true intent and drop off-target
-    // catalog items. On LLM failure, fall back to embedding order.
-    let display = ranked.kept.slice(0, RERANK_DISPLAY_CAP)
-    if (display.length > 1) {
-      const scores = await rerankCandidates(
-        query,
-        parsed,
-        display.map((r) => ({
-          id: r.listing.externalId,
-          title: r.listing.title,
-          brand: r.listing.sellerName,
-          priceMinor: r.listing.priceMinor,
-          currency: r.listing.currency,
-        })),
-      )
-      if (scores) {
-        display = display
-          .flatMap((r) => {
-            const s = scores.get(r.listing.externalId)
-            if (s === undefined) return [r]
-            if (s < RERANK_KEEP) return []
-            return [{ ...r, score: s }]
-          })
-          .sort((a, b) => b.score - a.score)
-      }
-    }
-
-    return {
-      kept: display,
-      dropped: rawListings.length - display.length,
-      rawCount: rawListings.length,
-      elapsedMs: Math.round(performance.now() - started),
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown error'
-    after(() => recordAdapterError(adapter.id, message).catch(() => {}))
-    console.error(`[adapter] ${adapter.label}: ${message}`)
-    return null
+  return {
+    kept: display,
+    dropped: result.rawCount - display.length,
+    rawCount: result.rawCount,
+    elapsedMs: result.elapsedMs,
+    fromCache: result.fromCache,
   }
 }
 
@@ -112,9 +105,10 @@ export async function AdapterSection({
   if (!data || data.kept.length === 0) return null
 
   const status =
-    data.dropped > 0
+    (data.dropped > 0
       ? `${data.kept.length} of ${data.rawCount} · ${data.elapsedMs}ms`
-      : `${data.kept.length} result${data.kept.length === 1 ? '' : 's'} · ${data.elapsedMs}ms`
+      : `${data.kept.length} result${data.kept.length === 1 ? '' : 's'} · ${data.elapsedMs}ms`) +
+    (data.fromCache ? ' · cached' : '')
 
   return (
     <section className="flex flex-col gap-4">

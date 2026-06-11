@@ -11,6 +11,13 @@ export type NormalizedListing = {
   sellerRating?: number
   reviewCount?: number
   reviewAvg?: number
+  /**
+   * Retailer-provided attribute text (product type, tags, description
+   * snippet). Fed to the LLM relevance judge as evidence for demanded
+   * attributes ("leather", "wireless") that bare-SKU titles never state.
+   * Not persisted; only used at search time.
+   */
+  detailsText?: string
   raw?: unknown
 }
 

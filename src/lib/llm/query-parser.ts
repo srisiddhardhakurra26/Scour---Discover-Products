@@ -89,7 +89,8 @@ function validate(raw: unknown, fallbackQuery: string): ParsedQuery {
 // Price thresholds are parsed deterministically rather than left to the LLM:
 // the fast model routinely flips "above $X" and "under $X". A regex gets the
 // direction right every time and works even when the LLM call fails entirely.
-function parsePriceBounds(query: string): { minPriceMinor?: number; maxPriceMinor?: number } {
+// Exported for tests.
+export function parsePriceBounds(query: string): { minPriceMinor?: number; maxPriceMinor?: number } {
   const q = query.toLowerCase()
   const amount = String.raw`\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:dollars?|usd|bucks?|\$)?`
   const toMinor = (s: string) => Math.round(parseFloat(s) * 100)
@@ -114,6 +115,16 @@ function parsePriceBounds(query: string): { minPriceMinor?: number; maxPriceMino
   )
   if (floor) out.minPriceMinor = toMinor(floor[1])
 
+  // "max $50" / "maximum 50 dollars" — but only with an explicit currency
+  // marker, so product names like "iPhone Pro Max 256GB" don't read as a
+  // price ceiling.
+  if (out.maxPriceMinor === undefined) {
+    const maxCur =
+      q.match(/\bmax(?:imum)?\s*(?:of\s*)?\$\s*(\d+(?:\.\d{1,2})?)/) ??
+      q.match(/\bmax(?:imum)?\s*(?:of\s*)?(\d+(?:\.\d{1,2})?)\s*(?:dollars?|usd|bucks?)\b/)
+    if (maxCur) out.maxPriceMinor = toMinor(maxCur[1])
+  }
+
   return out
 }
 
@@ -132,6 +143,7 @@ export const parseQuery = cache(async (rawQuery: string): Promise<ParsedQuery> =
   if (hit && hit.expiresAt > Date.now()) return hit.value
 
   let parsed: ParsedQuery
+  let llmOk = true
   try {
     const json = await generateJson(
       {
@@ -144,8 +156,11 @@ export const parseQuery = cache(async (rawQuery: string): Promise<ParsedQuery> =
     )
     parsed = validate(JSON.parse(json), trimmed)
   } catch (err) {
-    console.error('[query-parser]', err instanceof Error ? err.message : err)
+    // warn, not error: LLM failures fall back to the raw query and shouldn't
+    // trip the Next dev overlay.
+    console.warn('[query-parser]', err instanceof Error ? err.message : err)
     parsed = { refinedQuery: trimmed }
+    llmOk = false
   }
 
   // Price is authoritative from the deterministic parser, overriding whatever
@@ -154,6 +169,9 @@ export const parseQuery = cache(async (rawQuery: string): Promise<ParsedQuery> =
   parsed.minPriceMinor = bounds.minPriceMinor
   parsed.maxPriceMinor = bounds.maxPriceMinor
 
-  memo.set(key, { value: parsed, expiresAt: Date.now() + CACHE_TTL_MS })
+  // Only cache successful parses: a degraded parse cached for an hour would
+  // pin every repeat of this query to the fallback even after the LLM
+  // recovers. (React.cache still dedupes within the request.)
+  if (llmOk) memo.set(key, { value: parsed, expiresAt: Date.now() + CACHE_TTL_MS })
   return parsed
 })

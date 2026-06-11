@@ -1,8 +1,11 @@
 import { prisma } from '@/lib/db'
+import type { Adapter } from '@/lib/adapters/types'
 import { formatPrice } from '@/lib/format'
 import { bytesToFloat, dotProduct, embedQueryCached, EMBEDDING_DIM } from '@/lib/embeddings'
+import { searchAllAdapters } from '@/lib/fanout'
 import { parseQuery } from '@/lib/llm/query-parser'
 import { rerankCandidates } from '@/lib/llm/rerank'
+import { clusterHasTokenOverlap } from '@/lib/text'
 import { minPriceTrend } from '@/lib/price-history'
 import { Sparkline } from './Sparkline'
 import { SaveButton } from './SaveButton'
@@ -13,28 +16,6 @@ import { CardRail } from './CardRail'
 // Lower than the per-listing floor: a cluster having multiple retailers is
 // already a quality signal, so we can be a bit more permissive on relevance.
 const CLUSTER_RELEVANCE_FLOOR = 0.25
-
-function tokenMatchesTitle(token: string, titleLower: string): boolean {
-  if (titleLower.includes(token)) return true
-  if (token.endsWith('s') && token.length > 3 && titleLower.includes(token.slice(0, -1))) {
-    return true
-  }
-  return false
-}
-
-// Multi-word queries must have *every* meaningful token appear in at least
-// one listing in the cluster. Single-word queries need at least that one
-// token. Stops "fitbit air" from surfacing AirPods clusters because "air"
-// alone happens to be semantically close.
-function clusterHasTokenOverlap(query: string, titles: string[]): boolean {
-  const qTokens = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((t) => t.length >= 3)
-  if (qTokens.length === 0) return true
-  const lowered = titles.map((t) => t.toLowerCase())
-  return qTokens.every((tok) => lowered.some((title) => tokenMatchesTitle(tok, title)))
-}
 
 export function ClusteredProductsLoading() {
   return (
@@ -74,12 +55,6 @@ export function ClusteredProductsLoading() {
     </section>
   )
 }
-
-// We render in parallel with the adapter Suspense boundaries (which now
-// persist synchronously). Poll the DB until either we find visible clusters
-// or hit this timeout so adapters get a chance to write their results first.
-const POLL_TIMEOUT_MS = 7000
-const POLL_INTERVAL_MS = 600
 
 function fetchClusterCandidates() {
   return prisma.product.findMany({
@@ -143,37 +118,30 @@ function rankForQuery(
     .map((r) => r.product)
 }
 
-// Poll the DB until clusters are visible or we hit the timeout. Adapters in
-// parallel Suspense boundaries persist their listings synchronously during
-// render, so this waits for those writes (and resulting clusters) to appear.
-// A plain async helper so the polling clock lives outside the component render.
-async function pollForClusters(
-  matchQuery: string,
-  queryVec: Float32Array | null,
-  parsed: Awaited<ReturnType<typeof parseQuery>> | null,
-): Promise<Candidate[]> {
-  const deadline = Date.now() + POLL_TIMEOUT_MS
-  while (true) {
-    const products = await fetchClusterCandidates()
-    if (products.length > 0) {
-      const ranked =
-        queryVec && parsed ? rankForQuery(products, matchQuery, queryVec, parsed) : products
-      const visible = ranked.slice(0, 12)
-      if (visible.length > 0) return visible
-    }
-    if (Date.now() >= deadline) return []
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
-  }
-}
-
-export async function ClusteredProductsSection({ query }: { query: string }) {
-  // Pre-compute the query embedding + parse once; both are reused across
-  // every poll iteration.
+export async function ClusteredProductsSection({
+  query,
+  adapters,
+  timeoutMs,
+}: {
+  query: string
+  adapters: Adapter[]
+  timeoutMs: number
+}) {
   const parsed = query.trim() ? await parseQuery(query) : null
   const matchQuery = parsed?.refinedQuery || query
   const queryVec = parsed ? await embedQueryCached(matchQuery) : null
 
-  const visible = await pollForClusters(matchQuery, queryVec, parsed)
+  // Await the shared fan-out (deduped per request, see fanout.ts) so every
+  // adapter's listings are persisted and clustered before we read. This
+  // replaces the old DB poll, which raced the writes and could surface a
+  // partial — and run-to-run different — set of clusters.
+  await searchAllAdapters(adapters, query, timeoutMs)
+
+  const candidates = await fetchClusterCandidates()
+  if (candidates.length === 0) return null
+  const ranked =
+    queryVec && parsed ? rankForQuery(candidates, matchQuery, queryVec, parsed) : candidates
+  const visible = ranked.slice(0, 12)
   if (visible.length === 0) return null
 
   // Precision rerank of the clustered products by true intent (see rerank.ts).

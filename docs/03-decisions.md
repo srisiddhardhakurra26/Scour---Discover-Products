@@ -97,3 +97,17 @@ The search results UI streams listings as each adapter returns. A slow or failin
 **Why:** Fan-out latency is dominated by the slowest source (Temu's anti-bot delays can push 5+ seconds). Blocking on the slowest is unusable UX. React 19 Server Components + streaming is a natural fit.
 
 **How to apply:** Each adapter has a per-query timeout (e.g., 4s). On timeout, mark "Temu still loading…" in the UI; if it returns late, append. Circuit breakers degrade gracefully on repeated failures.
+
+---
+
+## ADR-009 — Perceptual image hashing as a clustering signal (amends ADR-003)
+
+**Status:** Accepted (2026-06-11)
+
+Listings get a 64-bit perceptual hash (dHash via sharp) of their primary product photo, computed by a background enrichment queue — never on the search path. Two listings whose hashes are within 6 bits are treated as the same product (subject to the same price-ratio guardrail as title clustering).
+
+**Why:** Retailers selling the same product overwhelmingly reuse the manufacturer's photo. A near-identical photo is a far stronger same-product signal than title cosine similarity, and a dHash costs one tiny image decode — no model, no API, no embedding. This amends the "matching is text-only" stance (ADR-003's CLIP-embedding idea stays dead: pHash is exact-duplicate detection, not semantic similarity, so it adds no false-positive surface for lookalike products).
+
+**How to apply:** Hashes are computed asynchronously after persist (`src/lib/enrich.ts`); since the listing is already title-clustered by then, the hash applies as a late merge — and only to listings sitting alone in their cluster, so an established cluster is never broken by one photo match. Re-clustering runs get a synchronous hash fast-path (`cluster.ts` pass 1.5).
+
+**Reconsider when:** Stores start serving per-session watermarked or recropped imagery (hash distance drifts above the threshold), or the listing table grows past the point where the in-memory hash scan needs an index structure (BK-tree or similar).

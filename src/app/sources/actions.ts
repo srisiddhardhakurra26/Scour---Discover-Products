@@ -119,12 +119,20 @@ export async function addStoreRetailer(
   // Fast paths failed → let the onboarder agent inspect the homepage and
   // generate a generic-html config. Slower (one LLM call + one fetch), so
   // the form's "Checking…" state can sit here for a few seconds.
-  const config = await onboardSource(domain)
-  if (!config) {
+  const onboarded = await onboardSource(domain)
+  if (!onboarded.ok) {
+    if (onboarded.blocked) {
+      return {
+        error:
+          `${domain} blocks automated access (bot protection), so it can't be added ` +
+          `as a scraped source. Stores like this only work via an official API or feed.`,
+      }
+    }
     return {
-      error: `${detect.message} (agent couldn't infer a scraper config either)`,
+      error: `${detect.message} (agent couldn't onboard it either: ${onboarded.message})`,
     }
   }
+  const config = onboarded.config
 
   const existing = await prisma.retailer.findUnique({
     where: { type_identifier: { type: 'generic-html', identifier: domain } },

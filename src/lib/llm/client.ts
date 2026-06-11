@@ -131,6 +131,82 @@ export async function generateJson(
   throw new Error(`all LLM providers failed: ${errors.join(' | ')}`)
 }
 
+// --- Vision (images + JSON out) -------------------------------------------
+// Gemini-only: it's the existing fallback provider and its free tier accepts
+// inline images. Callers must degrade gracefully when this throws (no key,
+// rate limit) — vision is never on the critical path.
+
+export type InlineImage = { mimeType: string; dataBase64: string }
+
+export async function generateJsonVision(
+  opts: { system: string; user: string; images: InlineImage[]; maxTokens?: number },
+  signal: AbortSignal = AbortSignal.timeout(15_000),
+): Promise<string> {
+  const key = process.env.GEMINI_API_KEY
+  if (!key) throw new LlmError('gemini', null, 'GEMINI_API_KEY not set')
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`
+  const res = await fetch(url, {
+    signal,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { role: 'system', parts: [{ text: opts.system }] },
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: opts.user },
+            ...opts.images.map((img) => ({
+              inlineData: { mimeType: img.mimeType, data: img.dataBase64 },
+            })),
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens: opts.maxTokens ?? 1024,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    }),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new LlmError('gemini', res.status, `${res.status}: ${body.slice(0, 200)}`)
+  }
+  const data = (await res.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+  }
+  const content = data.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!content) throw new LlmError('gemini', null, 'empty response')
+  return stripJsonFences(content)
+}
+
+/**
+ * Fetch an image and return it inline-ready for generateJsonVision. Size- and
+ * time-capped; returns null on any failure so callers can fall back to text.
+ */
+export async function fetchInlineImage(
+  url: string,
+  timeoutMs = 1500,
+  maxBytes = 600_000,
+): Promise<InlineImage | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return null
+    const mimeType = res.headers.get('content-type')?.split(';')[0]?.trim() ?? ''
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(mimeType)) return null
+    const len = Number(res.headers.get('content-length') ?? 0)
+    if (len > maxBytes) return null
+    const buf = await res.arrayBuffer()
+    if (buf.byteLength > maxBytes) return null
+    return { mimeType, dataBase64: Buffer.from(buf).toString('base64') }
+  } catch {
+    return null
+  }
+}
+
 // --- Conversational text (Copilot) ---------------------------------------
 // generateJson is single-shot JSON; the Copilot needs multi-turn, streamed,
 // free-text output. These helpers stay separate so the JSON agents are

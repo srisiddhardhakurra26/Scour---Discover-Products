@@ -23,8 +23,13 @@ Working app, well past the original design phase (~5k LOC). Home (`/`), search (
 2. **Embed + cluster.** Each listing title → a normalized 384-dim vector (local HF transformers, `src/lib/embeddings.ts`). `src/lib/cluster.ts` attaches a listing to an existing Product via ASIN exact-match (fast path) or cosine ≥ `0.82` plus a price-ratio guardrail (0.25×–4× cluster median); otherwise it starts a new Product.
 3. **LLM agent layer** (`src/lib/llm/`, shared client = Groq Llama first, Gemini fallback, JSON mode, temp 0):
    - **query-parser** — turns `"wireless earbuds under $80"` into `{refinedQuery, maxPriceMinor, brand, features}`. The clean `refinedQuery` is what gets embedded/searched; price/brand become hard filters. Cached; on failure falls back to the raw query.
-   - **source-onboarder** — when an added domain isn't Shopify/Woo, an LLM derives a scraper config (search-URL pattern, then CSS selectors from the real results page), verified before saving as a `generic-html` retailer.
-   - **adapter-repair** — when a `generic-html` source returns 0 results, an LLM re-derives a fixed config from re-rendered HTML, verified by actually extracting listings. Fires automatically at search time (once per source, guarded) or manually from `/sources`.
+   - **source-onboarder** — when an added domain isn't Shopify/Woo, the agent prefers schema.org/Product **JSON-LD** on the search page (`extraction: 'jsonld'`, immune to layout changes); otherwise an LLM derives CSS selectors from the real results page, verified before saving as a `generic-html` retailer. Bot-protected stores (403s/TLS kills, e.g. lululemon) fail fast with `blocked: true`.
+   - **adapter-repair** — when a `generic-html` source returns 0 results, repair tries JSON-LD first, then an LLM re-derives a fixed config from re-rendered HTML, verified by actually extracting listings. Fires automatically at search time (once per source, guarded) or manually from `/sources`.
+   - **vision-locate** (`vision-locate.ts`) — last-resort stage of onboarding/repair: Playwright screenshots the rendered page, Gemini Flash vision reads the exact title/price strings of visible cards, those strings are anchored in the DOM, and selectors are generalized from the real nodes. Beats HTML-only derivation on hashed/obfuscated class names.
+   - **requery** — a store whose first pass kept 0 listings gets one retry with a query reformulated in that store's vocabulary ("leather shoes" → "chelsea boot"); results still ranked against the original query. Cached per (store, query).
+   - **cluster-judge** — for cosine matches in the 0.78–0.86 gray band, asks for a same-product verdict (Gemini vision with both product images when fetchable, else text). Advisory: when unavailable, the plain 0.82 threshold decides.
+4. **Background enrichment** (`src/lib/enrich.ts`, queue drained off the search path): one image fetch per listing feeds a perceptual hash (`imageHash`, dHash via sharp — ADR-009 clustering signal, applied as a late merge to singleton clusters) and OCR'd spec text (`ocrText`, tesseract.js, confidence-gated ≥70 to reject junk reads of stylized photos).
+5. **Source watchdog** (`src/lib/watchdog.ts`, scheduled daily from instrumentation): probes each `generic-html` source with canary queries, auto-repairs stale selectors, and persists `SourceHealth` history rendered as the dot strip in `/sources`. `WATCHDOG_DISABLED=1` / `WATCHDOG_INTERVAL_MS` to control; `ENRICH_DISABLED=1` / `ENRICH_OCR_DISABLED=1` for enrichment.
 
 ## Read before writing code
 
@@ -35,7 +40,7 @@ Working app, well past the original design phase (~5k LOC). Home (`/`), search (
 
 ### Where the code diverges from the docs
 
-- **Matching is text-only.** No image/CLIP embeddings — that idea is dropped. `Listing.imageEmbedding` exists in the schema but is unused; don't build on it. (Supersedes the "image primary" claim in `docs/02` and ADR-003.)
+- **Matching is text-first, with an exact-photo signal.** No image/CLIP embeddings — that idea stays dropped, and `Listing.imageEmbedding` remains unused; don't build on it. ADR-009 added perceptual hashing (`Listing.imageHash`) as a same-photo clustering signal — exact-duplicate detection, not semantic similarity. (Supersedes the "image primary" claim in `docs/02` and ADR-003.)
 - **Stores actually built:** eBay, Amazon, Etsy, Best Buy, Shopify, WooCommerce, Reddit, Slickdeals (RSS), `generic-html` (LLM-onboarded), plus mock adapters. Temu / Shein / AliExpress / Walmart from the docs are **not** built.
 - **The LLM agent layer above is new** and isn't described in the docs.
 
@@ -49,4 +54,4 @@ Working app, well past the original design phase (~5k LOC). Home (`/`), search (
 
 ## Stack baseline
 
-Next.js 16, React 19, Prisma 7 + SQLite (better-sqlite3), TypeScript, `@huggingface/transformers` (local embeddings), `cheerio` + `playwright` (scraping), `rss-parser`, and a small Groq/Gemini JSON client (`GROQ_API_KEY` / `GEMINI_API_KEY`). Same core as FeedHub — author has muscle memory here.
+Next.js 16, React 19, Prisma 7 + SQLite (better-sqlite3), TypeScript, `@huggingface/transformers` (local embeddings), `cheerio` + `playwright` (scraping), `sharp` + `tesseract.js` (image enrichment, local), `rss-parser`, and a small Groq/Gemini JSON+vision client (`GROQ_API_KEY` / `GEMINI_API_KEY`; optional `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` switch the Reddit adapter to the official OAuth API). Same core as FeedHub — author has muscle memory here.

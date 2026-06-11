@@ -36,9 +36,12 @@ export function diagnoseZeroResults(
 
   // The configured card container still matches, yet extraction produced
   // nothing — the title/url selector moved within the card. Repairable.
+  // (jsonld-mode configs have no selectors; the grid check below covers them.)
   let containerMatches = 0
   try {
-    containerMatches = cheerio.load(html)(config.productSelector).length
+    containerMatches = config.productSelector
+      ? cheerio.load(html)(config.productSelector).length
+      : 0
   } catch {
     containerMatches = 0
   }

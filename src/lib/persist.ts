@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db'
 import type { NormalizedListing } from './adapters/types'
 import { embedTexts, floatToBytes } from './embeddings'
 import { clusterListing } from './cluster'
+import { enqueueEnrichment } from './enrich'
 import { normalizeTitle } from './text'
 
 export type PersistResult = {
@@ -41,6 +42,7 @@ export async function persistListings(
 
   type EmbedTarget = { listingId: string; index: number; needsFreshEmbed: boolean }
   const targets: EmbedTarget[] = []
+  const batchIds: string[] = []
 
   for (let i = 0; i < listings.length; i++) {
     const l = listings[i]
@@ -68,6 +70,7 @@ export async function persistListings(
       create: { retailerId, externalId: l.externalId, ...data },
     })
     upserts++
+    batchIds.push(listing.id)
 
     const priceChanged = !prior || prior.priceMinor !== l.priceMinor
     if (priceChanged && l.priceMinor > 0) {
@@ -117,6 +120,10 @@ export async function persistListings(
       console.error('[embed]', err)
     }
   }
+
+  // Background image enrichment (pHash + OCR) — fire-and-forget, after
+  // clustering so the late hash-merge sees this batch's product assignments.
+  enqueueEnrichment(batchIds)
 
   return { upserts, priceObservations, embedded, clustered }
 }

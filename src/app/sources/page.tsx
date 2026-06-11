@@ -46,10 +46,38 @@ const TYPE_LABEL: Record<string, string> = {
   mock: 'Mock sources (testing)',
 }
 
+const HEALTH_DOTS = 14
+
 export default async function SourcesPage() {
   const retailers = await prisma.retailer.findMany({
     orderBy: { label: 'asc' },
   })
+
+  // Watchdog history, newest first, sliced to the last few checks per source.
+  // Rendered oldest→newest as a dot strip in each row.
+  const healthRows = await prisma.sourceHealth.findMany({
+    orderBy: { checkedAt: 'desc' },
+    take: 1000,
+    select: { retailerId: true, status: true, count: true, detail: true, checkedAt: true },
+  })
+  const healthByRetailer = new Map<
+    string,
+    { status: string; label: string }[]
+  >()
+  for (const h of healthRows) {
+    let list = healthByRetailer.get(h.retailerId)
+    if (!list) {
+      list = []
+      healthByRetailer.set(h.retailerId, list)
+    }
+    if (list.length >= HEALTH_DOTS) continue
+    const detail = h.detail ? ` — ${h.detail}` : ''
+    list.push({
+      status: h.status,
+      label: `${h.status} (${h.count}) ${timeAgo(h.checkedAt)}${detail}`,
+    })
+  }
+  for (const list of healthByRetailer.values()) list.reverse()
 
   const byType = new Map<string, typeof retailers>()
   for (const r of retailers) {
@@ -107,6 +135,7 @@ export default async function SourcesPage() {
                       lastFetchedLabel={r.lastFetchedAt ? timeAgo(r.lastFetchedAt) : null}
                       lastError={r.lastError}
                       configSummary={configSummary(r.type, r.config)}
+                      healthHistory={healthByRetailer.get(r.id) ?? []}
                     />
                   ))}
                 </ul>

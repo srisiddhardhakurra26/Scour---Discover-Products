@@ -2,6 +2,7 @@ import { generateJson } from './client'
 import type { GenericHtmlConfig } from './source-onboarder'
 import { focusSearchHtml } from './html-focus'
 import { extractListings } from '@/lib/adapters/generic-extract'
+import { extractJsonLdListings } from '@/lib/adapters/jsonld'
 import { renderPage } from '@/lib/browser'
 
 const SYSTEM = `You repair a broken e-commerce scraper config.
@@ -153,8 +154,40 @@ export async function repairGenericAdapter(
     return null
   }
 
+  // Cheapest possible repair: the page embeds JSON-LD products, so broken
+  // selectors can be abandoned for structured data — no LLM round needed.
+  const jsonld = extractJsonLdListings(
+    pages.search.html,
+    domain,
+    config.brandName ?? domain,
+    config.currency,
+  )
+  if (jsonld.length >= 3) {
+    console.log(`[adapter-repair] ${domain}: switching to JSON-LD extraction (${jsonld.length} products)`)
+    return {
+      searchUrlTemplate: config.searchUrlTemplate,
+      extraction: 'jsonld',
+      urlPrefix: config.urlPrefix,
+      currency: config.currency,
+      brandName: config.brandName,
+      requiresJs: true,
+    }
+  }
+
+  // Last-resort fallback shared by every failure below: derive selectors
+  // from a screenshot of the rendered page (see vision-locate.ts). Pays off
+  // exactly where HTML-only repair fails — hashed/obfuscated class names.
+  const tryVision = async (): Promise<GenericHtmlConfig | null> => {
+    const { visionDeriveConfig } = await import('./vision-locate')
+    return visionDeriveConfig(domain, config.searchUrlTemplate, sampleQuery, {
+      urlPrefix: config.urlPrefix,
+      currency: config.currency,
+      brandName: config.brandName,
+    })
+  }
+
   let fixed = await askForFix(domain, config, sampleQuery, pages)
-  if (!fixed) return null
+  if (!fixed) return tryVision()
 
   // Verify the fix by running the *real* extraction against the rendered search
   // page. Matching productSelector alone isn't enough: a config can match cards
@@ -188,12 +221,12 @@ export async function repairGenericAdapter(
         `"${fixed.urlSelector}" produced empty values for every card. Pick ` +
         `selectors that actually contain the product title text and an <a href>.`,
     })
-    if (!retry) return null
+    if (!retry) return tryVision()
     fixed = retry
     listings = await verifyExtracts(fixed)
     if (listings === 0) {
       console.error(`[adapter-repair] fix still extracted 0 listings after retry`)
-      return null
+      return tryVision()
     }
   }
 

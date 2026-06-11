@@ -40,6 +40,26 @@ export type RenderedPage = {
  * the onboarder and repair agents so they see the same DOM a user would.
  */
 export async function renderPage(url: string, timeoutMs = 15_000): Promise<RenderedPage> {
+  return renderInternal(url, timeoutMs, false)
+}
+
+/**
+ * renderPage plus a viewport screenshot (JPEG), for the vision-grounded
+ * repair path: the model reads the pixels, the HTML maps them to selectors.
+ */
+export async function renderPageWithScreenshot(
+  url: string,
+  timeoutMs = 20_000,
+): Promise<RenderedPage & { screenshot: Buffer }> {
+  const page = await renderInternal(url, timeoutMs, true)
+  return page as RenderedPage & { screenshot: Buffer }
+}
+
+async function renderInternal(
+  url: string,
+  timeoutMs: number,
+  screenshot: boolean,
+): Promise<RenderedPage & { screenshot?: Buffer }> {
   const browser = await getBrowser()
   let context: BrowserContext | null = null
   let page: Page | null = null
@@ -65,6 +85,9 @@ export async function renderPage(url: string, timeoutMs = 15_000): Promise<Rende
       status: response?.status() ?? 0,
       html: initialHtml,
       jsRendered: true,
+      ...(screenshot
+        ? { screenshot: await page.screenshot({ type: 'jpeg', quality: 60 }) }
+        : {}),
     }
   } finally {
     if (page) await page.close().catch(() => {})
@@ -115,4 +138,19 @@ const BLOCK_MARKERS = [
 export function looksLikeBlockPage(html: string): boolean {
   const h = html.toLowerCase()
   return BLOCK_MARKERS.some((m) => h.includes(m))
+}
+
+// Enterprise bot protection (Akamai, Cloudflare) often rejects automated
+// browsers below HTTP: the TLS/HTTP2 handshake is fingerprinted and the
+// connection killed before any HTML exists. Those failures surface as
+// protocol/connection errors rather than status codes or block pages.
+const BLOCK_ERROR_RE =
+  /(bot-blocked|ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_EMPTY_RESPONSE|ECONNRESET|HTTP 403\b|^403\b|\b403:)/i
+
+/**
+ * Does this error message look like the site refusing automated access
+ * (connection-level kill or 403), as opposed to a timeout or DNS failure?
+ */
+export function isBotBlockSignal(message: string): boolean {
+  return BLOCK_ERROR_RE.test(message)
 }

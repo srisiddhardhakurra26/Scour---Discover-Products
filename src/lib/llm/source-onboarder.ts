@@ -1,21 +1,32 @@
 import { generateJson } from './client'
 import { focusSearchHtml, locateProductGrid } from './html-focus'
-import { looksLikeJsShell, renderPage } from '@/lib/browser'
+import { isBotBlockSignal, looksLikeBlockPage, looksLikeJsShell, renderPage } from '@/lib/browser'
 import { extractListings } from '@/lib/adapters/generic-extract'
+import { extractJsonLdListings } from '@/lib/adapters/jsonld'
+
+// A search page with at least this many JSON-LD products is trusted as a real
+// results list (a single Product usually means a product-detail page).
+const JSONLD_MIN_PRODUCTS = 3
 
 export type GenericHtmlConfig = {
   /** Template with literal `{query}` to interpolate the user's search. */
   searchUrlTemplate: string
+  /**
+   * How listings are pulled from the search page. 'jsonld' reads
+   * schema.org/Product structured data (no selectors needed, immune to
+   * layout changes); 'selectors' (the default) uses the CSS selectors below.
+   */
+  extraction?: 'jsonld' | 'selectors'
   /** CSS selector for each product card on the search page. */
-  productSelector: string
+  productSelector?: string
   /** CSS selector (relative to a card) for the product title. */
-  titleSelector: string
+  titleSelector?: string
   /** CSS selector for the price element; the parser will extract $X.XX. */
-  priceSelector: string
+  priceSelector?: string
   /** CSS selector for the product image; `src` or `data-src` is read. */
-  imageSelector: string
+  imageSelector?: string
   /** CSS selector for the link; `href` is read. */
-  urlSelector: string
+  urlSelector?: string
   /** Prepended to relative URLs (e.g. "https://example.com"). */
   urlPrefix?: string
   /** Currency code if non-USD. */
@@ -101,6 +112,7 @@ type SelectorConfig = {
 async function fetchHomepage(
   domain: string,
 ): Promise<{ html: string; requiresJs: boolean }> {
+  let plainStatus: number | null = null
   try {
     const res = await fetch(`https://${domain}/`, {
       signal: AbortSignal.timeout(8000),
@@ -110,6 +122,7 @@ async function fetchHomepage(
         'user-agent': REALISTIC_UA,
       },
     })
+    plainStatus = res.status
     if (res.ok) {
       const html = await res.text()
       if (!looksLikeJsShell(html)) return { html, requiresJs: false }
@@ -117,8 +130,22 @@ async function fetchHomepage(
   } catch {
     // fall through to Playwright
   }
-  const rendered = await renderPage(`https://${domain}/`, 20_000)
-  return { html: rendered.html, requiresJs: true }
+  try {
+    const rendered = await renderPage(`https://${domain}/`, 20_000)
+    return { html: rendered.html, requiresJs: true }
+  } catch (err) {
+    // A render timeout alone is ambiguous (slow site?), but combined with the
+    // plain fetch having been refused it's bot protection — Akamai-style
+    // setups reject scripted fetches with assorted 4xx (403 to curl, 400 to
+    // Node's TLS fingerprint) and stall automated browsers forever.
+    const msg = err instanceof Error ? err.message : String(err)
+    if (plainStatus !== null && plainStatus >= 400 && plainStatus < 500) {
+      throw new Error(
+        `bot-blocked: plain fetch refused with HTTP ${plainStatus}, render failed (${msg.slice(0, 80)})`,
+      )
+    }
+    throw err
+  }
 }
 
 /**
@@ -269,26 +296,46 @@ async function askForSelectors(
   }
 }
 
+export type OnboardResult =
+  | { ok: true; config: GenericHtmlConfig }
+  | {
+      ok: false
+      /** True when the store actively refuses automated access (bot protection). */
+      blocked: boolean
+      message: string
+    }
+
+const fail = (message: string, blocked = false): OnboardResult => ({ ok: false, blocked, message })
+
 /**
  * Two-stage onboarding:
  *   1. From the homepage, identify the search URL pattern.
- *   2. Hit the search URL with a real query; from that page's HTML, pick
- *      product-card selectors. Each stage is verified before moving on.
+ *   2. Hit the search URL with a real query; prefer JSON-LD structured data,
+ *      otherwise pick product-card selectors. Each stage is verified.
  *
- * Returns null if either stage can't be made to work after one retry.
+ * Fails with `blocked: true` when the store's bot protection refuses access —
+ * no amount of selector cleverness helps there, so callers should surface
+ * that as a hard boundary rather than a retryable error.
  */
-export async function onboardSource(domain: string): Promise<GenericHtmlConfig | null> {
+export async function onboardSource(domain: string): Promise<OnboardResult> {
   let homepage: { html: string; requiresJs: boolean }
   try {
     homepage = await fetchHomepage(domain)
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
     console.error('[source-onboarder] homepage fetch:', err)
-    return null
+    if (isBotBlockSignal(message)) {
+      return fail('the store blocks automated access (bot protection)', true)
+    }
+    return fail(`homepage could not be fetched (${message.slice(0, 120)})`)
+  }
+  if (looksLikeBlockPage(homepage.html)) {
+    return fail('the store served a bot challenge instead of its homepage', true)
   }
 
   // ── Stage 1: search URL ──────────────────────────────────────────────
   let urlCfg = await askForUrl(domain, homepage.html)
-  if (!urlCfg) return null
+  if (!urlCfg) return fail('could not infer a search URL from the homepage')
 
   // ── Stage 1.5: find a query that actually renders products ───────────
   // Try candidate queries until one returns a page with a product grid. Keep
@@ -299,6 +346,7 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
   let fallback: { html: string; requiresJs: boolean } | null = null
   let verifyQuery = queries[0]
   let urlRetried = false
+  let lastFetchError: string | null = null
 
   for (const q of queries) {
     let searchUrl = urlCfg.searchUrlTemplate.replace('{query}', encodeURIComponent(q))
@@ -322,12 +370,18 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
       }
     }
 
-    if ('error' in page) continue
+    if ('error' in page) {
+      lastFetchError = page.error
+      continue
+    }
     if (!fallback) {
       fallback = page
       verifyQuery = q
     }
-    if (locateProductGrid(page.html)) {
+    if (
+      locateProductGrid(page.html) ||
+      extractJsonLdListings(page.html, domain, domain).length >= JSONLD_MIN_PRODUCTS
+    ) {
       chosen = page
       verifyQuery = q
       console.log(`[source-onboarder] ${domain}: product grid found for query "${q}"`)
@@ -338,13 +392,59 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
   const searchPage = chosen ?? fallback
   if (!searchPage) {
     console.error(`[source-onboarder] no search query returned a fetchable page for ${domain}`)
-    return null
+    if (lastFetchError && isBotBlockSignal(lastFetchError)) {
+      return fail('the store blocks automated access (bot protection)', true)
+    }
+    return fail(
+      `no search query returned a fetchable results page${lastFetchError ? ` (${lastFetchError.slice(0, 120)})` : ''}`,
+    )
   }
   const searchUrl = urlCfg.searchUrlTemplate.replace('{query}', encodeURIComponent(verifyQuery))
 
+  // ── Stage 2a: prefer JSON-LD over selectors when the page embeds it ──
+  // Structured data is exact and survives layout redesigns, so it skips the
+  // selector LLM round entirely and never needs selector repair.
+  const requiresJsEarly = searchPage.requiresJs || homepage.requiresJs
+  const jsonld = extractJsonLdListings(
+    searchPage.html,
+    domain,
+    urlCfg.brandName ?? domain,
+    urlCfg.currency,
+  )
+  if (jsonld.length >= JSONLD_MIN_PRODUCTS) {
+    console.log(
+      `[source-onboarder] ${domain}: ${jsonld.length} JSON-LD products on ${searchUrl} — using structured data`,
+    )
+    return {
+      ok: true,
+      config: {
+        searchUrlTemplate: urlCfg.searchUrlTemplate,
+        extraction: 'jsonld',
+        urlPrefix: urlCfg.urlPrefix,
+        currency: urlCfg.currency,
+        brandName: urlCfg.brandName,
+        requiresJs: requiresJsEarly,
+      },
+    }
+  }
+
+  // Last-resort fallback shared by every selector-stage failure below:
+  // derive selectors from a screenshot of the rendered page (vision model
+  // reads the cards, the DOM anchors them). See vision-locate.ts.
+  const tryVision = async (): Promise<OnboardResult> => {
+    const { visionDeriveConfig } = await import('./vision-locate')
+    const config = await visionDeriveConfig(domain, urlCfg.searchUrlTemplate, verifyQuery, {
+      urlPrefix: urlCfg.urlPrefix,
+      currency: urlCfg.currency,
+      brandName: urlCfg.brandName,
+    })
+    if (config) return { ok: true, config }
+    return fail('could not derive working card selectors from the search page')
+  }
+
   // ── Stage 2: selectors against the real search page ──────────────────
   let selectors = await askForSelectors(domain, searchPage.html)
-  if (!selectors) return null
+  if (!selectors) return tryVision()
 
   const requiresJs = searchPage.requiresJs || homepage.requiresJs
   const buildConfig = (s: SelectorConfig): GenericHtmlConfig => ({
@@ -380,14 +480,14 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
         `produced empty values for every card. Pick selectors whose elements actually contain ` +
         `the product title text and an <a href> to the product page.`,
     })
-    if (!retry) return null
+    if (!retry) return tryVision()
     selectors = retry
     listings = extractListings(searchPage.html, buildConfig(selectors), domain, label).length
     if (listings === 0) {
       console.error(
         `[source-onboarder] selectors still extracted 0 complete listings after retry`,
       )
-      return null
+      return tryVision()
     }
   }
 
@@ -395,5 +495,5 @@ export async function onboardSource(domain: string): Promise<GenericHtmlConfig |
     `[source-onboarder] ${domain}: ${listings} listings extracted on ${searchUrl}`,
   )
 
-  return buildConfig(selectors)
+  return { ok: true, config: buildConfig(selectors) }
 }

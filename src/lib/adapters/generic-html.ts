@@ -1,4 +1,3 @@
-import * as cheerio from 'cheerio'
 import type { Adapter, NormalizedListing } from './types'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
 import { extractListings } from './generic-extract'
@@ -38,11 +37,11 @@ export async function loadSearchHtml(
     if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
     html = await res.text()
 
-    // Plain fetch returned a JS shell, or nothing the selector matched.
+    // Plain fetch returned a JS shell, or nothing extractable.
     // Re-render with Chromium and try again. This catches sites where the
     // onboarder happened to verify against a partly-SSR'd page but real
     // queries return content-light shells that need JS to populate.
-    if (cheerio.load(html)(config.productSelector).length === 0 || looksLikeJsShell(html)) {
+    if (extractListings(html, config, domain, label).length === 0 || looksLikeJsShell(html)) {
       const rendered = await renderPage(url, 18_000)
       html = rendered.html
     }

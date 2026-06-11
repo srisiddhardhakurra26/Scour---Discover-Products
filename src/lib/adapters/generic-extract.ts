@@ -3,6 +3,7 @@ import type { Cheerio } from 'cheerio'
 import type { AnyNode } from 'domhandler'
 import type { NormalizedListing } from './types'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
+import { extractJsonLdListings } from './jsonld'
 
 function parsePriceMinor(text: string): number {
   const m = text.match(/([0-9]+(?:[.,][0-9]+)*)/)
@@ -37,8 +38,15 @@ export function extractListings(
   domain: string,
   label: string,
 ): NormalizedListing[] {
+  if (config.extraction === 'jsonld') {
+    return extractJsonLdListings(html, domain, label, config.currency)
+  }
+  const { productSelector, titleSelector, priceSelector, imageSelector, urlSelector } = config
+  if (!productSelector || !titleSelector || !priceSelector || !imageSelector || !urlSelector) {
+    return []
+  }
   const $ = cheerio.load(html)
-  const cards = $(config.productSelector)
+  const cards = $(productSelector)
   const results: NormalizedListing[] = []
   const prefix = config.urlPrefix ?? `https://${domain}`
   const currency = config.currency ?? 'USD'
@@ -47,17 +55,17 @@ export function extractListings(
     if (results.length >= 12) return false
     const card = $(el)
 
-    const title = card.find(config.titleSelector).first().text().trim()
+    const title = card.find(titleSelector).first().text().trim()
     if (!title) return
-    const priceText = card.find(config.priceSelector).first().text().trim()
+    const priceText = card.find(priceSelector).first().text().trim()
     const priceMinor = parsePriceMinor(priceText)
 
-    const link = card.find(config.urlSelector).first()
+    const link = card.find(urlSelector).first()
     const href = pickAttr(link, ['href'])
     if (!href) return
     const productUrl = absoluteUrl(href, prefix)
 
-    const img = card.find(config.imageSelector).first()
+    const img = card.find(imageSelector).first()
     const rawSrc = pickAttr(img, ['src', 'data-src', 'data-original', 'data-lazy-src'])
     const imageUrl = rawSrc ? absoluteUrl(rawSrc, prefix) : undefined
 

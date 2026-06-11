@@ -10,6 +10,7 @@ import {
   type RankedListing,
 } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
+import { reformulateForStore } from '@/lib/llm/requery'
 import { withHardTimeout } from '@/lib/timeout'
 
 // When a live fetch fails (timeout, bot-block), serve the retailer's
@@ -77,11 +78,47 @@ async function run(
       timeoutMs + 1500,
       `${adapter.label} search`,
     )
-    const ranked = await rankByRelevance(query, raw, parsed, recallModeForType(adapter.type))
+    let ranked = await rankByRelevance(query, raw, parsed, recallModeForType(adapter.type))
     // Demanded materials are mandatory (deterministic twin of the judge's
     // rule) — applied here so every view, persist, and the clusters section
     // see the same gated set.
     ranked.kept = materialGate(query, parsed, ranked.kept)
+
+    // Agentic re-query: a store that kept nothing gets one retry with a
+    // query reformulated in its own vocabulary ("leather shoes" → "chelsea
+    // boot" at a boot brand). Results are still ranked against the user's
+    // original query, so intent can't drift. LLM-down or no suggestion →
+    // we simply keep the empty first pass.
+    if (ranked.kept.length === 0 && adapter.type !== 'mock') {
+      const alt = await reformulateForStore(query, adapter.label, adapter.type)
+      if (alt && alt !== searchQuery.toLowerCase()) {
+        try {
+          const altRaw = await withHardTimeout(
+            adapter.search(alt, AbortSignal.timeout(timeoutMs)),
+            timeoutMs + 1500,
+            `${adapter.label} re-query`,
+          )
+          const altRanked = await rankByRelevance(
+            query,
+            altRaw,
+            parsed,
+            recallModeForType(adapter.type),
+          )
+          altRanked.kept = materialGate(query, parsed, altRanked.kept)
+          if (altRanked.kept.length > 0) {
+            console.log(
+              `[requery] ${adapter.label}: "${alt}" rescued ${altRanked.kept.length} listings`,
+            )
+            ranked = altRanked
+          }
+        } catch (err) {
+          console.warn(
+            `[requery] ${adapter.label} retry failed:`,
+            err instanceof Error ? err.message : err,
+          )
+        }
+      }
+    }
     // Persist before resolving (not via after()) so ClusteredProductsSection,
     // which awaits this same promise, sees the writes and the clusters built
     // from them.
@@ -171,6 +208,9 @@ async function loadRecentListings(retailerId: string): Promise<NormalizedListing
     sellerRating: r.sellerRating ?? undefined,
     reviewCount: r.reviewCount ?? undefined,
     reviewAvg: r.reviewAvg ?? undefined,
-    detailsText: r.detailsText ?? undefined,
+    // OCR'd image text rides along as judge evidence ("256GB", "wireless")
+    // that bare titles never state.
+    detailsText:
+      [r.detailsText, r.ocrText].filter(Boolean).join('\n') || undefined,
   }))
 }

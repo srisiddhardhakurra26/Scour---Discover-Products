@@ -12,6 +12,20 @@ import {
 const USER_REMOVABLE_TYPES = new Set(['shopify', 'woocommerce', 'generic-html'])
 const AGENT_REPAIRABLE_TYPES = new Set(['generic-html'])
 
+type HealthDot = { status: string; label: string }
+
+// Watchdog statuses → dot colors. 'repaired' is green on purpose: the source
+// broke and healed itself, which is the system working.
+const DOT_COLOR: Record<string, string> = {
+  ok: 'bg-success',
+  repaired: 'bg-success',
+  blocked: 'bg-warn',
+  empty: 'bg-fg-subtle',
+  stale: 'bg-danger',
+  'repair-failed': 'bg-danger',
+  'config-error': 'bg-danger',
+}
+
 export function RetailerRow({
   id,
   type,
@@ -21,6 +35,7 @@ export function RetailerRow({
   lastFetchedLabel,
   lastError,
   configSummary,
+  healthHistory = [],
 }: {
   id: string
   type: string
@@ -30,6 +45,7 @@ export function RetailerRow({
   lastFetchedLabel: string | null
   lastError: string | null
   configSummary: string | null
+  healthHistory?: HealthDot[]
 }) {
   const [pending, startTransition] = useTransition()
   const [repairing, startRepair] = useTransition()
@@ -158,6 +174,28 @@ export function RetailerRow({
         <p className="rounded-md border border-danger/30 bg-danger/10 px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-danger/90">
           {lastError}
         </p>
+      )}
+
+      {healthHistory.length > 0 && (
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+            watchdog
+          </span>
+          <div className="flex items-center gap-1">
+            {healthHistory.map((h, i) => (
+              <span
+                key={i}
+                title={h.label}
+                className={`h-1.5 w-1.5 rounded-full ${DOT_COLOR[h.status] ?? 'bg-fg-subtle'}`}
+              />
+            ))}
+          </div>
+          {healthHistory[healthHistory.length - 1]?.status === 'blocked' && (
+            <span className="font-mono text-[10px] uppercase tracking-wider text-warn">
+              blocked by bot protection
+            </span>
+          )}
+        </div>
       )}
 
       {open && (

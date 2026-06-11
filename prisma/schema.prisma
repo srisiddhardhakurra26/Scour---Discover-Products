@@ -16,6 +16,7 @@ model Retailer {
   lastFetchedAt DateTime?
   lastError     String?
   listings      Listing[]
+  healthChecks  SourceHealth[]
 
   @@unique([type, identifier])
 }
@@ -37,8 +38,10 @@ model Listing {
   reviewAvg      Float?
   raw            String?
   detailsText    String?
+  ocrText        String?
   textEmbedding  Bytes?
   imageEmbedding Bytes?
+  imageHash      String?
   productId      String?
   capturedAt     DateTime           @default(now())
   lastSeenAt     DateTime           @default(now())
@@ -49,6 +52,7 @@ model Listing {
   @@unique([retailerId, externalId])
   @@index([productId])
   @@index([capturedAt])
+  @@index([imageHash])
 }
 
 model Product {
@@ -76,6 +80,19 @@ model PriceObservation {
   listing    Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
   @@index([listingId, capturedAt])
+}
+
+model SourceHealth {
+  id         String   @id @default(cuid())
+  retailerId String
+  status     String
+  query      String
+  count      Int      @default(0)
+  detail     String?
+  checkedAt  DateTime @default(now())
+  retailer   Retailer @relation(fields: [retailerId], references: [id], onDelete: Cascade)
+
+  @@index([retailerId, checkedAt])
 }
 
 model SavedProduct {

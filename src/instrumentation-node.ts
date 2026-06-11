@@ -16,6 +16,30 @@ export function warmup() {
   warmShopifyCatalogs().catch((err) =>
     console.warn('[instrumentation] catalog prewarm failed:', err),
   )
+
+  scheduleWatchdog()
+}
+
+// Daily source watchdog: probes agent-onboarded sources, auto-repairs stale
+// selectors, and persists a health history for /sources. Delayed past boot so
+// it never competes with first-search warmup; unref'd so it never holds the
+// process open. WATCHDOG_DISABLED=1 turns it off, WATCHDOG_INTERVAL_MS tunes.
+const WATCHDOG_INITIAL_DELAY_MS = 5 * 60_000
+
+function scheduleWatchdog() {
+  if (process.env.WATCHDOG_DISABLED) return
+  // Dev hot-reload re-runs warmup; arm the timers once per process.
+  const g = globalThis as { __scourWatchdogArmed?: boolean }
+  if (g.__scourWatchdogArmed) return
+  g.__scourWatchdogArmed = true
+
+  const intervalMs = Number(process.env.WATCHDOG_INTERVAL_MS) || 24 * 60 * 60_000
+  const run = () =>
+    import('./lib/watchdog')
+      .then((m) => m.runWatchdog())
+      .catch((err) => console.warn('[watchdog]', err instanceof Error ? err.message : err))
+  setTimeout(run, WATCHDOG_INITIAL_DELAY_MS).unref()
+  setInterval(run, intervalMs).unref()
 }
 
 async function warmShopifyCatalogs() {

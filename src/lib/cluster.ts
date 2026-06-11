@@ -1,5 +1,11 @@
 import { prisma } from '@/lib/db'
 import { bytesToFloat, dotProduct, EMBEDDING_DIM } from './embeddings'
+import {
+  JUDGE_BAND_HIGH,
+  JUDGE_BAND_LOW,
+  judgeSameProduct,
+} from './llm/cluster-judge'
+import { hashesMatch } from './phash'
 import { extractASIN } from './text'
 
 // Bumped from 0.75 → 0.82 to reduce over-clustering. Combined with title
@@ -86,7 +92,7 @@ export async function clusterListing(
 ): Promise<{ productId: string; created: boolean; similarity: number; reason: string }> {
   const listing = await prisma.listing.findUnique({
     where: { id: listingId },
-    select: { title: true, url: true, imageUrl: true, priceMinor: true },
+    select: { title: true, url: true, imageUrl: true, priceMinor: true, imageHash: true },
   })
   if (!listing) throw new Error(`listing not found: ${listingId}`)
 
@@ -98,6 +104,25 @@ export async function clusterListing(
       await prisma.listing.update({ where: { id: listingId }, data: { productId } })
       await updateProductAggregates(productId)
       return { productId, created: false, similarity: 1, reason: `asin:${asin}` }
+    }
+  }
+
+  // --- Pass 1.5: shared product imagery (ADR-009). Hashes are computed by
+  // the background enrichment queue, so this mostly fires on re-clustering;
+  // fresh listings get the same signal via the late hash-merge in enrich.ts.
+  if (listing.imageHash) {
+    const hashed = await prisma.listing.findMany({
+      where: { imageHash: { not: null }, productId: { not: null }, id: { not: listingId } },
+      select: { imageHash: true, productId: true, priceMinor: true },
+    })
+    const hashMatch = hashed.find((r) => hashesMatch(listing.imageHash!, r.imageHash!))
+    if (hashMatch?.productId && priceFits(listing.priceMinor, [hashMatch.priceMinor])) {
+      await prisma.listing.update({
+        where: { id: listingId },
+        data: { productId: hashMatch.productId },
+      })
+      await updateProductAggregates(hashMatch.productId)
+      return { productId: hashMatch.productId, created: false, similarity: 1, reason: 'image-hash' }
     }
   }
 
@@ -115,7 +140,36 @@ export async function clusterListing(
     if (!best || sim > best.similarity) best = { product: p, similarity: sim }
   }
 
-  if (best && best.similarity >= SIMILARITY_THRESHOLD) {
+  // In the gray band around the threshold, cosine alone is unreliable — ask
+  // the LLM judge (titles + images) for a verdict. Above the band, cosine is
+  // trusted outright; when the judge is unavailable the plain threshold rule
+  // decides, so search works identically with the LLM down.
+  let attach = false
+  let matchReason = ''
+  if (best && best.similarity >= JUDGE_BAND_LOW) {
+    if (best.similarity >= JUDGE_BAND_HIGH) {
+      attach = true
+      matchReason = 'cosine'
+    } else {
+      const verdict = await judgeSameProduct(
+        { title: listing.title, priceMinor: listing.priceMinor, imageUrl: listing.imageUrl },
+        {
+          title: best.product.canonicalTitle,
+          priceMinor: median(best.product.listings.map((l) => l.priceMinor).filter((p) => p > 0)),
+          imageUrl: best.product.canonicalImage,
+        },
+      )
+      if (verdict !== null) {
+        attach = verdict
+        matchReason = verdict ? 'judge-yes' : 'judge-no'
+      } else {
+        attach = best.similarity >= SIMILARITY_THRESHOLD
+        matchReason = 'cosine'
+      }
+    }
+  }
+
+  if (best && attach) {
     const prices = best.product.listings.map((l) => l.priceMinor)
     if (priceFits(listing.priceMinor, prices)) {
       await prisma.listing.update({
@@ -127,7 +181,7 @@ export async function clusterListing(
         productId: best.product.id,
         created: false,
         similarity: best.similarity,
-        reason: 'cosine+price-ok',
+        reason: `${matchReason}+price-ok`,
       }
     }
     // Similarity passed but price doesn't fit — likely an accessory/scam.
@@ -153,7 +207,8 @@ export async function clusterListing(
     productId: product.id,
     created: true,
     similarity: best?.similarity ?? 0,
-    reason: best && best.similarity >= SIMILARITY_THRESHOLD ? 'price-rejected' : 'no-match',
+    reason:
+      best && attach ? 'price-rejected' : matchReason === 'judge-no' ? 'judge-no' : 'no-match',
   }
 }
 

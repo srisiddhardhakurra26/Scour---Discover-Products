@@ -3,15 +3,7 @@
 #   203-0-113-5.sslip.io      -> free auto-HTTPS, no domain needed
 #   scour.example.com         -> your own domain, auto-HTTPS
 {$SITE_ADDRESS} {
-	# Password gate — every visitor must log in. Share the username + password
-	# only with people you want; withhold it from anyone you don't.
-	# To change the password later, regenerate the bcrypt hash on the VM:
-	#   sudo docker compose exec caddy caddy hash-password --plaintext 'NEWPASS'
-	# then paste the new hash below and redeploy.
-	basic_auth {
-		scour $2a$10$AijdPxdyXz4luJQ8uyi1wOGG0xXCvx1rCBg0mVxX1QDF9JgAa59MS
-	}
-
+	# No password gate — Scour is intentionally open (owner's choice, 2026-06-13).
 	reverse_proxy app:3000
 }
 

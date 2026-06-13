@@ -91,30 +91,38 @@ jobs:
           echo "--- current Caddyfile ---"; cat "$CADDYFILE"
           echo "::endgroup::"
 
-          echo "::group::6. validate config, then RESTART caddy so it actually loads it"
-          # A plain 'caddy reload' was adapting the config but NOT applying it, so the
-          # running server kept serving stale routes. Validate first (if the config is
-          # bad, abort here WITHOUT restarting, so Scour keeps serving its current
-          # config), then restart the caddy container to force a clean load.
+          echo "::group::6. validate, then RECREATE caddy so it actually loads the file"
+          # IMPORTANT: every Docker command below redirects stdin from /dev/null.
+          # Without that, 'docker compose exec' / 'docker exec' consume the rest of
+          # this here-doc script (the script is fed to 'bash -se' over SSH stdin),
+          # so every line AFTER the exec silently never runs — which is why earlier
+          # 'reload'/'restart' steps appeared to "succeed" but never actually ran.
+          echo "-- SITE_ADDRESS in ~/scour/.env --"
+          grep -E '^SITE_ADDRESS=' "$HOME/scour/.env" || echo "(!! no SITE_ADDRESS line in ~/scour/.env)"
+          CADDY="$(sudo docker ps --filter name=caddy --format '{{.Names}}' | head -1)"
+          echo "-- SITE_ADDRESS inside the running caddy container --"
+          sudo docker exec "$CADDY" printenv SITE_ADDRESS </dev/null || echo "(!! SITE_ADDRESS not set in caddy container)"
+          # Validate first; if invalid, abort WITHOUT recreating so Scour keeps serving.
           sudo docker compose -f "$HOME/scour/docker-compose.yml" exec -T caddy \
-            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-          echo "config valid — restarting caddy container..."
-          sudo docker compose -f "$HOME/scour/docker-compose.yml" restart caddy
-          echo "caddy restarted"
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null
+          echo "config valid — recreating caddy (re-reads .env + Caddyfile)..."
+          sudo docker compose -f "$HOME/scour/docker-compose.yml" up -d --force-recreate caddy </dev/null
+          echo "caddy recreated"
           echo "::endgroup::"
 
           echo "::group::7. diagnostics"
-          sleep 10
-          echo "-- containers --"
-          sudo docker ps --filter name=feedhub-app --filter name=caddy --format '{{.Names}}  {{.Status}}'
-          echo "-- can caddy reach feedhub-app:3000? --"
-          sudo docker compose -f "$HOME/scour/docker-compose.yml" exec -T caddy \
-            wget -q -O /dev/null --timeout=5 http://feedhub-app:3000/ && echo "reachable (HTTP 2xx)" || echo "wget exit non-zero (a redirect/4xx still means the network path works; only DNS/refused = broken)"
-          echo "-- caddy logs: feedhub TLS cert issuance / ACME / rate-limit / errors --"
+          sleep 12
           CADDY="$(sudo docker ps --filter name=caddy --format '{{.Names}}' | head -1)"
-          sudo docker logs --tail 150 "$CADDY" 2>&1 | grep -iE 'feedhub|certificate|acme|obtain|rate|error|tls' | tail -40 || true
-          echo "-- last 30 lines of feedhub-app logs --"
-          sudo docker logs --tail 30 feedhub-app 2>&1 || true
+          echo "-- containers --"
+          sudo docker ps --filter name=feedhub-app --filter name=caddy --format '{{.Names}}  {{.Status}}' </dev/null
+          echo "-- hostnames in the RUNNING caddy config (admin API) --"
+          sudo docker exec "$CADDY" wget -qO- http://localhost:2019/config/ </dev/null 2>/dev/null \
+            | grep -oE '"host":\[[^]]*\]' | sort -u || echo "(could not read admin API)"
+          echo "-- can caddy reach feedhub-app:3000? --"
+          sudo docker exec "$CADDY" wget -q -O /dev/null --timeout=5 http://feedhub-app:3000/ </dev/null \
+            && echo "reachable (HTTP 2xx)" || echo "wget exit non-zero (a redirect/4xx still means the network path works; only DNS/refused = broken)"
+          echo "-- caddy logs: feedhub TLS cert issuance / ACME / rate-limit / errors --"
+          sudo docker logs --tail 200 "$CADDY" 2>&1 | grep -iE 'feedhub|certificate|acme|obtain|rate|error|tls|site address|warn' | tail -50 || true
           echo "::endgroup::"
 
           echo "DONE → https://$HOSTNAME (cert is auto-issued within ~30s of first load)"

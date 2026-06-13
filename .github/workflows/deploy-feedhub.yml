@@ -73,33 +73,46 @@ jobs:
           sudo docker image prune -f
           echo "::endgroup::"
 
-          echo "::group::5. ensure Caddy has the feedhub route"
+          echo "::group::5. fix Caddy config: ensure feedhub route, remove Scour password"
+          # feedhub route — add if missing
           if ! grep -q 'feedhub-app:3000' "$CADDYFILE"; then
             printf '\n%s {\n\treverse_proxy feedhub-app:3000\n}\n' "$HOSTNAME" >> "$CADDYFILE"
             echo "appended feedhub block to $CADDYFILE"
           else
-            echo "feedhub block already present in $CADDYFILE"
+            echo "feedhub block already present"
+          fi
+          # Scour password gate — remove it (owner wants Scour open, no login)
+          if grep -q 'basic_auth {' "$CADDYFILE"; then
+            sed -i '/^[[:space:]]*basic_auth {/,/^[[:space:]]*}/d' "$CADDYFILE"
+            echo "removed basic_auth block from $CADDYFILE"
+          else
+            echo "no basic_auth block present"
           fi
           echo "--- current Caddyfile ---"; cat "$CADDYFILE"
           echo "::endgroup::"
 
-          echo "::group::6. reload Caddy (fails loudly if the config is bad)"
+          echo "::group::6. validate config, then RESTART caddy so it actually loads it"
+          # A plain 'caddy reload' was adapting the config but NOT applying it, so the
+          # running server kept serving stale routes. Validate first (if the config is
+          # bad, abort here WITHOUT restarting, so Scour keeps serving its current
+          # config), then restart the caddy container to force a clean load.
           sudo docker compose -f "$HOME/scour/docker-compose.yml" exec -T caddy \
-            caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-          echo "Caddy reloaded OK"
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          echo "config valid — restarting caddy container..."
+          sudo docker compose -f "$HOME/scour/docker-compose.yml" restart caddy
+          echo "caddy restarted"
           echo "::endgroup::"
 
           echo "::group::7. diagnostics"
-          echo "-- feedhub-app container --"
-          sudo docker ps --filter name=feedhub-app --format '{{.Names}}  {{.Status}}'
-          echo "-- feedhub-app networks --"
-          sudo docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' feedhub-app || true
-          echo "-- caddy networks --"
-          CADDY="$(sudo docker ps --filter name=caddy --format '{{.Names}}' | head -1)"
-          sudo docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$CADDY" || true
-          echo "-- can Caddy reach feedhub-app:3000? --"
+          sleep 10
+          echo "-- containers --"
+          sudo docker ps --filter name=feedhub-app --filter name=caddy --format '{{.Names}}  {{.Status}}'
+          echo "-- can caddy reach feedhub-app:3000? --"
           sudo docker compose -f "$HOME/scour/docker-compose.yml" exec -T caddy \
             wget -q -O /dev/null --timeout=5 http://feedhub-app:3000/ && echo "reachable (HTTP 2xx)" || echo "wget exit non-zero (a redirect/4xx still means the network path works; only DNS/refused = broken)"
+          echo "-- caddy logs: feedhub TLS cert issuance / ACME / rate-limit / errors --"
+          CADDY="$(sudo docker ps --filter name=caddy --format '{{.Names}}' | head -1)"
+          sudo docker logs --tail 150 "$CADDY" 2>&1 | grep -iE 'feedhub|certificate|acme|obtain|rate|error|tls' | tail -40 || true
           echo "-- last 30 lines of feedhub-app logs --"
           sudo docker logs --tail 30 feedhub-app 2>&1 || true
           echo "::endgroup::"

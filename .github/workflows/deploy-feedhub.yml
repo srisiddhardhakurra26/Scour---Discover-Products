@@ -1,13 +1,13 @@
 name: Deploy feedhub to Oracle VM
 
 # feedhub is a separate app that shares this VM with Scour. Scour's Caddy fronts
-# both and routes by hostname (see Caddyfile: feedhub.167-234-217-97.sslip.io).
-# This job clones feedhub from its PUBLIC repo onto the VM, builds it, starts it
-# on Scour's Docker network, and reloads Caddy. It reuses the SSH_* secrets that
-# already exist in this (Scour) repo, so feedhub needs no secrets of its own.
+# both and routes by hostname (feedhub.167-234-217-97.sslip.io). This job clones
+# feedhub from its PUBLIC repo onto the VM, builds + starts it on Scour's Docker
+# network, makes sure Caddy has the feedhub route, reloads Caddy, and prints
+# diagnostics. It reuses the SSH_* secrets already in this (Scour) repo.
 #
-# Run it from the GitHub "Actions" tab → "Deploy feedhub to Oracle VM" →
-# "Run workflow". Re-run it any time you push changes to the feedhub repo.
+# Run from the GitHub "Actions" tab → "Deploy feedhub to Oracle VM" →
+# "Run workflow". Re-run any time you push changes to the feedhub repo.
 on:
   workflow_dispatch:
 
@@ -26,52 +26,83 @@ jobs:
           chmod 600 ~/.ssh/id_deploy
           ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Clone/update feedhub on the VM and (re)deploy
+      - name: Deploy feedhub on the VM
         run: |
           ssh -i ~/.ssh/id_deploy "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" 'bash -se' <<'REMOTE'
           set -euo pipefail
           REPO=https://github.com/srisiddhardhakurra26/feedhub.git
           DIR="$HOME/feedhub"
+          HOSTNAME=feedhub.167-234-217-97.sslip.io
+          CADDYFILE="$HOME/scour/Caddyfile"
 
-          # 1. get / update the feedhub source (public repo, no auth needed)
+          echo "::group::1. get / update feedhub source"
           if [ -d "$DIR/.git" ]; then
             git -C "$DIR" fetch --depth 1 origin main
             git -C "$DIR" reset --hard FETCH_HEAD
           else
             git clone --depth 1 "$REPO" "$DIR"
           fi
+          echo "::endgroup::"
 
-          # 2. find the Docker network Scour's Caddy is attached to
+          echo "::group::2. detect Scour's Docker network"
           NET="$(sudo docker network ls --format '{{.Name}}' | grep -E '^scour.*_default$' | head -1 || true)"
           NET="${NET:-scour_default}"
           echo "Scour network: $NET"
+          echo "::endgroup::"
 
-          # 3. write feedhub's env on first run; keep it (and its session secret)
-          #    stable on later runs, only refreshing the network name.
+          echo "::group::3. write feedhub env (first run only)"
           if [ ! -f "$DIR/.env" ]; then
-            SECRET="$(openssl rand -hex 32)"
             {
               echo "APP_PASSWORD=feedhub"
-              echo "SESSION_SECRET=$SECRET"
-              echo "APP_URL=https://feedhub.167-234-217-97.sslip.io"
+              echo "SESSION_SECRET=$(openssl rand -hex 32)"
+              echo "APP_URL=https://$HOSTNAME"
               echo "DATABASE_URL=file:/data/feedhub.db"
               echo "SCOUR_NETWORK=$NET"
             } > "$DIR/.env"
-            echo "wrote a fresh $DIR/.env (APP_PASSWORD=feedhub — change it!)"
+            echo "wrote fresh .env (APP_PASSWORD=feedhub — change it!)"
           elif grep -q '^SCOUR_NETWORK=' "$DIR/.env"; then
             sed -i "s|^SCOUR_NETWORK=.*|SCOUR_NETWORK=$NET|" "$DIR/.env"
           else
             echo "SCOUR_NETWORK=$NET" >> "$DIR/.env"
           fi
+          echo "::endgroup::"
 
-          # 4. build + (re)start feedhub
+          echo "::group::4. build + (re)start feedhub"
           cd "$DIR"
           sudo docker compose up -d --build
           sudo docker image prune -f
+          echo "::endgroup::"
 
-          # 5. reload Scour's Caddy so the feedhub hostname starts routing
+          echo "::group::5. ensure Caddy has the feedhub route"
+          if ! grep -q 'feedhub-app:3000' "$CADDYFILE"; then
+            printf '\n%s {\n\treverse_proxy feedhub-app:3000\n}\n' "$HOSTNAME" >> "$CADDYFILE"
+            echo "appended feedhub block to $CADDYFILE"
+          else
+            echo "feedhub block already present in $CADDYFILE"
+          fi
+          echo "--- current Caddyfile ---"; cat "$CADDYFILE"
+          echo "::endgroup::"
+
+          echo "::group::6. reload Caddy (fails loudly if the config is bad)"
           sudo docker compose -f "$HOME/scour/docker-compose.yml" exec -T caddy \
-            caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || true
+            caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+          echo "Caddy reloaded OK"
+          echo "::endgroup::"
 
-          echo "feedhub deployed → https://feedhub.167-234-217-97.sslip.io"
+          echo "::group::7. diagnostics"
+          echo "-- feedhub-app container --"
+          sudo docker ps --filter name=feedhub-app --format '{{.Names}}  {{.Status}}'
+          echo "-- feedhub-app networks --"
+          sudo docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' feedhub-app || true
+          echo "-- caddy networks --"
+          CADDY="$(sudo docker ps --filter name=caddy --format '{{.Names}}' | head -1)"
+          sudo docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$CADDY" || true
+          echo "-- can Caddy reach feedhub-app:3000? --"
+          sudo docker compose -f "$HOME/scour/docker-compose.yml" exec -T caddy \
+            wget -q -O /dev/null --timeout=5 http://feedhub-app:3000/ && echo "reachable (HTTP 2xx)" || echo "wget exit non-zero (a redirect/4xx still means the network path works; only DNS/refused = broken)"
+          echo "-- last 30 lines of feedhub-app logs --"
+          sudo docker logs --tail 30 feedhub-app 2>&1 || true
+          echo "::endgroup::"
+
+          echo "DONE → https://$HOSTNAME (cert is auto-issued within ~30s of first load)"
           REMOTE

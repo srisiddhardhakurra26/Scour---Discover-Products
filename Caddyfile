@@ -14,3 +14,11 @@
 
 	reverse_proxy app:3000
 }
+
+# feedhub — a separate app sharing this VM, told apart by hostname. It runs as
+# its own container (feedhub-app) joined to this Compose network, and brings up
+# its own password login (APP_PASSWORD), so no Caddy basic_auth here. Deployed
+# by .github/workflows/deploy-feedhub.yml. Caddy auto-issues its cert too.
+feedhub.167-234-217-97.sslip.io {
+	reverse_proxy feedhub-app:3000
+}

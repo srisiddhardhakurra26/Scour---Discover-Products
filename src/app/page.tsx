@@ -63,6 +63,14 @@ export default async function Home() {
             <SearchBar size="lg" />
           </div>
 
+          <p className="text-sm text-fg-muted">
+            Or run a{' '}
+            <Link href="/missions" className="text-accent-strong underline-offset-2 hover:underline">
+              shopping mission
+            </Link>
+            {' '}— gift briefs, kits, and multi-product goals, planned by the agent.
+          </p>
+
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
             <span className="text-fg-subtle">try</span>
             {TRENDING.map((q) => (

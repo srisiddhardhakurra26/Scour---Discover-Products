@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Scour — price overlay",
+  "version": "0.1.0",
+  "description": "On any product page, show cheaper matches across stores via your Scour instance.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Scour overlay",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/*",
+        "https://www.amazon.co.uk/*",
+        "https://www.amazon.ca/*",
+        "https://www.ebay.com/*",
+        "https://www.ebay.co.uk/*",
+        "https://www.etsy.com/*",
+        "https://www.bestbuy.com/*",
+        "https://www.walmart.com/*",
+        "https://www.target.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

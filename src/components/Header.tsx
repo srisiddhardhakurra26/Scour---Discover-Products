@@ -11,6 +11,12 @@ export function Header({ children }: { children?: React.ReactNode }) {
         <div className="flex flex-1 items-center justify-end gap-1">
           {children}
           <Link
+            href="/missions"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
+          >
+            Missions
+          </Link>
+          <Link
             href="/wishlist"
             className="rounded-md px-3 py-1.5 text-xs font-medium text-fg-muted transition-colors hover:bg-bg-hover hover:text-fg"
           >

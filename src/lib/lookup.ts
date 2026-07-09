@@ -5,6 +5,16 @@ import { formatPrice } from '@/lib/format'
 /** Sources that are chatter/deals, not product storefronts. */
 const NON_SHOP_TYPES = new Set(['reddit', 'rss', 'mock'])
 
+// A lookup query is a full product title, so real matches score high on the
+// scale documented in relevance.ts (~0.5+ clearly related, ~0.3 same
+// category, ~0.15 off-topic). The fan-out's high-recall floor (0.15) is right
+// for browsing but lets catalog-dump junk (a coffee bag against a face serum)
+// into a lookup, so gate harder here: alternatives must be at least
+// category-adjacent, and the "Save $X" headline must come from a clearly
+// related item — never from whatever cheap thing squeaked past the recall gate.
+const ALTERNATIVE_MIN_SCORE = 0.35
+const CHEAPEST_MIN_SCORE = 0.5
+
 export type LookupOffer = {
   title: string
   priceMinor: number
@@ -93,11 +103,11 @@ export async function lookupProduct(input: {
   const results = await searchAllAdapters(adapters, query, ADAPTER_TIMEOUT_MS)
 
   const offers: LookupOffer[] = []
-  let storesHit = 0
+  const hitStores = new Set<string>()
   for (const r of results) {
     if (r.failed || r.kept.length === 0) continue
-    storesHit++
     for (const item of r.kept.slice(0, 5)) {
+      if (item.score < ALTERNATIVE_MIN_SCORE) continue
       const listing = item.listing
       if (!listing.priceMinor || listing.priceMinor <= 0) continue
       // Skip offers on the same host the user is already viewing
@@ -105,6 +115,7 @@ export async function lookupProduct(input: {
       if (pageHost && offerHost && (offerHost === pageHost || offerHost.endsWith(`.${pageHost}`))) {
         continue
       }
+      hitStores.add(r.adapter.label)
       offers.push({
         title: listing.title,
         priceMinor: listing.priceMinor,
@@ -117,6 +128,7 @@ export async function lookupProduct(input: {
       })
     }
   }
+  const storesHit = hitStores.size
 
   // Prefer relevance, then price. Dedupe by store+rough title.
   offers.sort((a, b) => {
@@ -134,8 +146,11 @@ export async function lookupProduct(input: {
     if (alternatives.length >= 8) break
   }
 
-  // Cheapest among alternatives that are at least somewhat relevant
-  const priced = [...alternatives].sort((a, b) => a.priceMinor - b.priceMinor)
+  // Cheapest among clearly-related alternatives only — a weaker match may
+  // still be listed, but it never drives the savings headline.
+  const priced = alternatives
+    .filter((o) => o.score >= CHEAPEST_MIN_SCORE)
+    .sort((a, b) => a.priceMinor - b.priceMinor)
   const cheapest = priced[0] ?? null
 
   let savingsMinor: number | null = null

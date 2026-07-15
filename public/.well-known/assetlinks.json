@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.srisiddhardhakurra.scour",
+      "sha256_cert_fingerprints": [
+        "D3:6B:2F:CC:0B:EE:61:EE:F6:A1:66:5D:89:08:F6:AE:18:54:25:84:D7:5F:0D:FC:C9:7C:8E:96:68:7F:AD:AD"
+      ]
+    }
+  }
+]

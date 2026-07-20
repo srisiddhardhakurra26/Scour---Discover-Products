@@ -56,16 +56,17 @@ export function ClusteredProductsLoading() {
   )
 }
 
-function fetchClusterCandidates() {
+function fetchClusterCandidates(retailerIds: string[]) {
   return prisma.product.findMany({
-    where: { retailerCount: { gte: 2 } },
+    where: { listings: { some: { retailerId: { in: retailerIds } } } },
     include: {
       listings: {
+        where: { retailerId: { in: retailerIds } },
         include: {
-          retailer: { select: { label: true, type: true } },
+          retailer: { select: { id: true, label: true, type: true } },
           prices: {
-            orderBy: { capturedAt: 'asc' },
-            select: { priceMinor: true, capturedAt: true },
+            orderBy: { capturedAt: 'desc' },
+            select: { priceMinor: true, capturedAt: true, currency: true },
             take: 30,
           },
         },
@@ -137,7 +138,11 @@ export async function ClusteredProductsSection({
   // partial — and run-to-run different — set of clusters.
   await searchAllAdapters(adapters, query, timeoutMs)
 
-  const candidates = await fetchClusterCandidates()
+  const retailerIds = adapters.map((adapter) => adapter.id)
+  if (retailerIds.length < 2) return null
+  const candidates = (await fetchClusterCandidates(retailerIds)).filter(
+    (product) => new Set(product.listings.map((listing) => listing.retailerId)).size >= 2,
+  )
   if (candidates.length === 0) return null
   const ranked =
     queryVec && parsed ? rankForQuery(candidates, matchQuery, queryVec, parsed) : candidates
@@ -155,8 +160,8 @@ export async function ClusteredProductsSection({
         id: p.id,
         title: p.canonicalTitle,
         brand: p.brand,
-        priceMinor: p.listings[0]?.priceMinor,
-        currency: p.listings[0]?.currency,
+        priceMinor: p.listings.find((listing) => listing.priceMinor > 0)?.priceMinor,
+        currency: p.listings.find((listing) => listing.priceMinor > 0)?.currency,
       })),
     )
     if (scores) {
@@ -211,11 +216,12 @@ type ProductRow = {
   listings: Array<{
     id: string
     url: string
+    imageUrl: string | null
     priceMinor: number
     currency: string
     sellerName: string | null
-    retailer: { label: string | null; type: string }
-    prices: Array<{ priceMinor: number; capturedAt: Date }>
+    retailer: { id: string; label: string | null; type: string }
+    prices: Array<{ priceMinor: number; capturedAt: Date; currency: string }>
   }>
 }
 
@@ -223,23 +229,30 @@ function ProductCard({ product, saved }: { product: ProductRow; saved: boolean }
   // Dedupe by retailer: keep cheapest listing per retailer.
   // "One from r/buildapcsales is enough." Same applies to Slickdeals, Allbirds, etc.
   const dedupedMap = new Map<string, ProductRow['listings'][number]>()
-  const sortedByPrice = [...product.listings].sort((a, b) => a.priceMinor - b.priceMinor)
+  const sortedByPrice = [...product.listings].sort((a, b) => {
+    const ap = a.priceMinor > 0 ? a.priceMinor : Number.MAX_SAFE_INTEGER
+    const bp = b.priceMinor > 0 ? b.priceMinor : Number.MAX_SAFE_INTEGER
+    return ap - bp
+  })
   for (const l of sortedByPrice) {
-    const key = (l.retailer.label ?? l.retailer.type).toLowerCase()
+    const key = l.retailer.id
     if (!dedupedMap.has(key)) dedupedMap.set(key, l)
   }
   const deduped = [...dedupedMap.values()]
   const hiddenCount = product.listings.length - deduped.length
 
   const lowest = deduped[0]
-  const highest = deduped[deduped.length - 1]
+  const priced = deduped.filter((l) => l.priceMinor > 0)
+  const comparablePrices = priced.filter((listing) => listing.currency === lowest.currency)
+  const highest = comparablePrices[comparablePrices.length - 1]
   const spread =
-    deduped.length > 1 && highest.priceMinor > 0
+    comparablePrices.length > 1 && highest.priceMinor > 0
       ? Math.round(((highest.priceMinor - lowest.priceMinor) / highest.priceMinor) * 100)
       : 0
 
   // Aggregated lowest-price-over-time across all listings (see price-history.ts).
-  const trend = minPriceTrend(product.listings).map((p) => p.priceMinor)
+  const trend = minPriceTrend(product.listings, lowest.currency).map((p) => p.priceMinor)
+  const displayImage = product.listings.find((listing) => listing.imageUrl)?.imageUrl
 
   const visibleListings = deduped.slice(0, 4)
   const overflow = hiddenCount + Math.max(0, deduped.length - visibleListings.length)
@@ -253,10 +266,10 @@ function ProductCard({ product, saved }: { product: ProductRow; saved: boolean }
         className="block h-24 w-24 shrink-0 overflow-hidden rounded-lg bg-bg-elevated transition-transform hover:scale-[1.02]"
         aria-label={`Open cheapest listing for ${product.canonicalTitle}`}
       >
-        {product.canonicalImage ? (
+        {displayImage ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={product.canonicalImage}
+            src={displayImage}
             alt={product.canonicalTitle}
             loading="lazy"
             className="h-full w-full object-cover"
@@ -303,7 +316,7 @@ function ProductCard({ product, saved }: { product: ProductRow; saved: boolean }
                 <span
                   className={`shrink-0 font-mono font-bold tabular-nums ${i === 0 ? 'text-accent-strong' : 'text-fg-muted'}`}
                 >
-                  {formatPrice(l.priceMinor, l.currency)}
+                  {l.priceMinor > 0 ? formatPrice(l.priceMinor, l.currency) : 'unavailable'}
                 </span>
               </a>
             </li>

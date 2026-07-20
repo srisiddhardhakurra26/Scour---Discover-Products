@@ -19,6 +19,7 @@ export type CanaryStatus =
   | 'repair-failed'
   | 'blocked'
   | 'empty'
+  | 'unreachable'
   | 'config-error'
 
 export type CanaryReport = {
@@ -84,13 +85,18 @@ export async function checkSource(
   const queries = canaryQueries(config)
   let lastHtml = ''
   let lastQuery = queries[0] ?? 'sale'
+  let lastSuccessfulQuery = lastQuery
+  let lastFetchError = ''
+  let hadSuccessfulFetch = false
 
   for (const q of queries) {
     lastQuery = q
     try {
       lastHtml = await loadSearchHtml(config, q, domain, label)
-    } catch {
-      lastHtml = ''
+      hadSuccessfulFetch = true
+      lastSuccessfulQuery = q
+    } catch (err) {
+      lastFetchError = err instanceof Error ? err.message : String(err)
       continue // network/render error — try the next query before giving up
     }
     const count = extractListings(lastHtml, config, domain, label).length
@@ -99,6 +105,13 @@ export async function checkSource(
       return { ...base, status: 'ok', query: q, count }
     }
   }
+
+  if (!hadSuccessfulFetch && lastFetchError) {
+    const detail = lastFetchError.slice(0, 200)
+    if (!opts.dryRun) await recordAdapterError(retailer.id, detail)
+    return { ...base, status: 'unreachable', query: lastQuery, count: 0, detail }
+  }
+  lastQuery = lastSuccessfulQuery
 
   // Zero across every canary query — figure out why from the last page we saw.
   const cause = lastHtml ? diagnoseZeroResults(lastHtml, config) : 'empty'

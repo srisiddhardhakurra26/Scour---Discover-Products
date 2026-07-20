@@ -7,14 +7,22 @@ export const runtime = 'nodejs'
 type IncomingMessage = { role?: unknown; content?: unknown }
 
 export async function POST(req: Request) {
-  let body: { query?: unknown; messages?: unknown }
+  let body: { query?: unknown; sourceIds?: unknown; messages?: unknown }
   try {
     body = await req.json()
   } catch {
     return new Response('Invalid JSON.', { status: 400 })
   }
 
-  const query = typeof body.query === 'string' ? body.query : ''
+  const query = typeof body.query === 'string' ? body.query.trim().slice(0, 200) : ''
+  const sourceIds = Array.isArray(body.sourceIds)
+    ? body.sourceIds
+        .filter(
+          (id): id is string =>
+            typeof id === 'string' && id.length <= 128 && /^[A-Za-z0-9_-]+$/.test(id),
+        )
+        .slice(0, 50)
+    : undefined
   const incoming = Array.isArray(body.messages) ? (body.messages as IncomingMessage[]) : []
 
   // Keep only well-formed user/assistant turns, cap history + per-message length.
@@ -28,7 +36,7 @@ export async function POST(req: Request) {
 
   if (history.length === 0) return new Response('No messages.', { status: 400 })
 
-  const context = await buildCopilotContext(query).catch(() => '')
+  const context = await buildCopilotContext(query, sourceIds).catch(() => '')
   const messages: ChatMessage[] = [
     { role: 'system', content: `${COPILOT_SYSTEM}\n\n${context}` },
     ...history,

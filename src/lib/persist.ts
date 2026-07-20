@@ -12,6 +12,22 @@ export type PersistResult = {
   clustered: number
 }
 
+const RAW_MAX_CHARS = 50_000
+
+function serializeRaw(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined
+  try {
+    const serialized = JSON.stringify(raw, (_key, value) =>
+      typeof value === 'bigint' ? value.toString() : value,
+    )
+    return typeof serialized === 'string' && serialized.length <= RAW_MAX_CHARS
+      ? serialized
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export async function persistListings(
   retailerId: string,
   listings: NormalizedListing[],
@@ -33,6 +49,7 @@ export async function persistListings(
       priceMinor: true,
       title: true,
       textEmbedding: true,
+      productId: true,
     },
   })
   const existingByExt = new Map(existingRows.map((r) => [r.externalId, r]))
@@ -40,7 +57,7 @@ export async function persistListings(
   let upserts = 0
   let priceObservations = 0
 
-  type EmbedTarget = { listingId: string; index: number; needsFreshEmbed: boolean }
+  type EmbedTarget = { listingId: string; index: number }
   const targets: EmbedTarget[] = []
   const batchIds: string[] = []
 
@@ -59,7 +76,7 @@ export async function persistListings(
       sellerRating: l.sellerRating,
       reviewCount: l.reviewCount,
       reviewAvg: l.reviewAvg,
-      raw: l.raw ? JSON.stringify(l.raw) : undefined,
+      raw: serializeRaw(l.raw),
       detailsText: l.detailsText,
       lastSeenAt: new Date(),
     }
@@ -82,8 +99,8 @@ export async function persistListings(
 
     const titleChanged = prior && prior.title !== l.title
     const noEmbedding = !prior || !prior.textEmbedding
-    if (noEmbedding || titleChanged) {
-      targets.push({ listingId: listing.id, index: i, needsFreshEmbed: !precomputedEmbeddings })
+    if (noEmbedding || titleChanged || !prior?.productId) {
+      targets.push({ listingId: listing.id, index: i })
     }
   }
 
@@ -104,6 +121,7 @@ export async function persistListings(
       for (let j = 0; j < targets.length; j++) {
         const { listingId } = targets[j]
         const vec = vectors[j]
+        if (!(vec instanceof Float32Array)) continue
         await prisma.listing.update({
           where: { id: listingId },
           data: { textEmbedding: floatToBytes(vec) },

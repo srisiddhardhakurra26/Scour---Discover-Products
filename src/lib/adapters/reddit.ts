@@ -1,4 +1,5 @@
 import type { Adapter, NormalizedListing } from './types'
+import { readJsonLimited } from '@/lib/http'
 
 type RedditChild = {
   data: {
@@ -55,7 +56,7 @@ async function getOAuthToken(signal?: AbortSignal): Promise<string | null> {
     body: 'grant_type=client_credentials',
   })
   if (!res.ok) throw new Error(`reddit oauth: HTTP ${res.status}`)
-  const data = (await res.json()) as { access_token?: string; expires_in?: number }
+  const data = await readJsonLimited<{ access_token?: string; expires_in?: number }>(res, 100_000)
   if (!data.access_token) throw new Error('reddit oauth: no token in response')
   cachedToken = {
     token: data.access_token,
@@ -99,7 +100,7 @@ export function createRedditAdapter(id: string, label: string, subreddit: string
       })
       if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
 
-      const data = (await res.json()) as RedditResponse
+      const data = await readJsonLimited<RedditResponse>(res, 2_000_000)
       const children = data.data?.children ?? []
       return children.slice(0, 15).map((c, i) => {
         const p = c.data

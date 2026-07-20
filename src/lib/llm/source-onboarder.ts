@@ -3,6 +3,8 @@ import { focusSearchHtml, locateProductGrid } from './html-focus'
 import { isBotBlockSignal, looksLikeBlockPage, looksLikeJsShell, renderPage } from '@/lib/browser'
 import { extractListings } from '@/lib/adapters/generic-extract'
 import { extractJsonLdListings } from '@/lib/adapters/jsonld'
+import { fetchSafeRemote, isStorefrontUrl } from '@/lib/url-safety'
+import { readTextLimited } from '@/lib/http'
 
 // A search page with at least this many JSON-LD products is trusted as a real
 // results list (a single Product usually means a product-detail page).
@@ -114,7 +116,7 @@ async function fetchHomepage(
 ): Promise<{ html: string; requiresJs: boolean }> {
   let plainStatus: number | null = null
   try {
-    const res = await fetch(`https://${domain}/`, {
+    const res = await fetchSafeRemote(`https://${domain}/`, {
       signal: AbortSignal.timeout(8000),
       headers: {
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -124,7 +126,7 @@ async function fetchHomepage(
     })
     plainStatus = res.status
     if (res.ok) {
-      const html = await res.text()
+      const html = await readTextLimited(res, 4_000_000)
       if (!looksLikeJsShell(html)) return { html, requiresJs: false }
     }
   } catch {
@@ -159,7 +161,7 @@ async function fetchSearchPage(
 ): Promise<{ html: string; requiresJs: boolean } | { error: string }> {
   if (!forceJs) {
     try {
-      const res = await fetch(url, {
+      const res = await fetchSafeRemote(url, {
         signal: AbortSignal.timeout(10_000),
         headers: {
           accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -169,7 +171,7 @@ async function fetchSearchPage(
         },
       })
       if (!res.ok) return { error: `HTTP ${res.status}` }
-      const html = await res.text()
+      const html = await readTextLimited(res, 6_000_000)
       if (!looksLikeJsShell(html)) return { html, requiresJs: false }
       // Fell through — page was a JS shell, fall back to Playwright.
     } catch (err) {
@@ -207,14 +209,16 @@ function validateUrl(raw: unknown, domain: string): UrlConfig | null {
   if (!/^https?:\/\//i.test(tpl)) {
     tpl = `https://${domain}${tpl.startsWith('/') ? '' : '/'}${tpl}`
   }
+  if (!isStorefrontUrl(tpl, domain, { requireQueryPlaceholder: true })) return null
   const out: UrlConfig = { searchUrlTemplate: tpl }
   if (typeof obj.brandName === 'string' && obj.brandName.trim()) {
-    out.brandName = obj.brandName.trim()
+    out.brandName = obj.brandName.trim().slice(0, 100)
   }
   if (typeof obj.urlPrefix === 'string' && obj.urlPrefix.trim()) {
-    out.urlPrefix = obj.urlPrefix.trim().replace(/\/+$/, '')
+    const prefix = obj.urlPrefix.trim().replace(/\/+$/, '')
+    if (isStorefrontUrl(prefix, domain)) out.urlPrefix = prefix
   }
-  if (typeof obj.currency === 'string' && obj.currency.trim().length === 3) {
+  if (typeof obj.currency === 'string' && /^[A-Za-z]{3}$/.test(obj.currency.trim())) {
     out.currency = obj.currency.trim().toUpperCase()
   }
   return out
@@ -231,7 +235,13 @@ function validateSelectors(raw: unknown): SelectorConfig | null {
     'urlSelector',
   ] as const
   for (const k of keys) {
-    if (typeof obj[k] !== 'string' || !(obj[k] as string).trim()) return null
+    if (
+      typeof obj[k] !== 'string' ||
+      !(obj[k] as string).trim() ||
+      (obj[k] as string).length > 500
+    ) {
+      return null
+    }
   }
   return {
     productSelector: (obj.productSelector as string).trim(),

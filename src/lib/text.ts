@@ -86,12 +86,46 @@ export function normalizeTitle(raw: string): string {
   return s
 }
 
-/** Lowercased query tokens (>= 3 chars) required to appear in a title. */
-export function meaningfulTokens(query: string): string[] {
+const QUERY_STOP_WORDS = new Set([
+  'and',
+  'for',
+  'from',
+  'into',
+  'the',
+  'that',
+  'this',
+  'with',
+])
+
+function withoutPricePhrases(query: string): string {
+  const amount = String.raw`\$?\s*\d+(?:\.\d{1,2})?\s*(?:dollars?|usd|bucks?)?(?![\p{L}\p{N}])`
   return query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((t) => t.length >= 3)
+    .replace(
+      new RegExp(String.raw`\bbetween\s+${amount}\s+(?:and|to|-)\s+${amount}`, 'giu'),
+      ' ',
+    )
+    .replace(
+      new RegExp(
+        String.raw`\b(?:under|below|less than|at most|up to|cheaper than|no more than|above|over|more than|at least|starting at|minimum|min)\s*${amount}`,
+        'giu',
+      ),
+      ' ',
+    )
+    .replace(
+      /\bmax(?:imum)?(?:\s+of)?\s*(?:\$\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:dollars?|usd|bucks?))\b/gi,
+      ' ',
+    )
+}
+
+/** Normalized query tokens (>= 3 chars) that carry product meaning. */
+export function meaningfulTokens(query: string): string[] {
+  return [
+    ...new Set(
+      (withoutPricePhrases(query).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter(
+        (token) => token.length >= 3 && !QUERY_STOP_WORDS.has(token),
+      ),
+    ),
+  ]
 }
 
 /** Does a query token appear in a (lowercased) title, allowing plural→singular? */
@@ -128,6 +162,21 @@ export function clusterHasTokenOverlap(query: string, titles: string[]): boolean
   if (qTokens.length === 0) return true
   const lowered = titles.map((t) => t.toLowerCase())
   return qTokens.every((tok) => lowered.some((title) => tokenMatchesTitle(tok, title)))
+}
+
+/** Require a configurable share of meaningful tokens across title/evidence. */
+export function hasTokenCoverage(
+  query: string,
+  texts: Array<string | undefined>,
+  fraction = 0.5,
+): boolean {
+  const tokens = meaningfulTokens(query)
+  if (tokens.length === 0) return true
+  const haystacks = texts.filter((text): text is string => Boolean(text)).map((text) => text.toLowerCase())
+  const matched = tokens.filter((token) =>
+    haystacks.some((text) => tokenMatchesTitle(token, text)),
+  ).length
+  return matched >= Math.ceil(tokens.length * Math.min(1, Math.max(0, fraction)))
 }
 
 /** Extract a 10-char Amazon ASIN from a URL (anywhere — /dp/, /gp/product/, raw, etc.) */

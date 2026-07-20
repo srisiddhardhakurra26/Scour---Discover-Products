@@ -5,6 +5,8 @@ import { diagnoseZeroResults } from './diagnose'
 import { repairGenericAdapter } from '@/lib/llm/adapter-repair'
 import { renderPage, looksLikeJsShell } from '@/lib/browser'
 import { prisma } from '@/lib/db'
+import { fetchSafeRemote, isStorefrontUrl } from '@/lib/url-safety'
+import { readTextLimited } from '@/lib/http'
 
 const REALISTIC_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
@@ -17,6 +19,9 @@ export async function loadSearchHtml(
   label: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  if (!isStorefrontUrl(config.searchUrlTemplate, domain, { requireQueryPlaceholder: true })) {
+    throw new Error(`${label}: unsafe search URL template`)
+  }
   const url = config.searchUrlTemplate.replace('{query}', encodeURIComponent(query))
 
   let html: string
@@ -25,7 +30,7 @@ export async function loadSearchHtml(
     const rendered = await renderPage(url, 18_000)
     html = rendered.html
   } else {
-    const res = await fetch(url, {
+    const res = await fetchSafeRemote(url, {
       signal,
       headers: {
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -35,7 +40,7 @@ export async function loadSearchHtml(
       },
     })
     if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
-    html = await res.text()
+    html = await readTextLimited(res, 6_000_000)
 
     // Plain fetch returned a JS shell, or nothing extractable.
     // Re-render with Chromium and try again. This catches sites where the

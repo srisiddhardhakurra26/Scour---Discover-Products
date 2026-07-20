@@ -1,4 +1,5 @@
 import type { Adapter, NormalizedListing } from './types'
+import { readJsonLimited } from '@/lib/http'
 
 type WooImage = { src?: string; thumbnail?: string }
 type WooPrices = {
@@ -45,7 +46,7 @@ export function createWooCommerceAdapter(opts: {
       })
       if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
 
-      const products = (await res.json()) as WooProduct[]
+      const products = await readJsonLimited<WooProduct[]>(res, 3_000_000)
 
       return products.map((p) => {
         const minorUnit = p.prices?.currency_minor_unit ?? 2

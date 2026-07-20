@@ -44,7 +44,7 @@ const FEED_TYPES = new Set(['reddit', 'rss'])
 // Sources that ignore the query and return their whole catalog (relevance is
 // decided entirely on our side). These are the ones the LLM judge exists for;
 // marketplace adapters already matched the query server-side.
-export const CATALOG_DUMP_TYPES = new Set(['shopify', 'woocommerce'])
+export const CATALOG_DUMP_TYPES = new Set(['shopify'])
 
 // Fabric/material words a shopper can demand. When one appears in the query,
 // it is mandatory (mirrors the LLM judge's rule: "do NOT assume an unstated

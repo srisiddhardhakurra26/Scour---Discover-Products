@@ -17,14 +17,19 @@ export default async function SearchPage({
   searchParams: Promise<{ q?: string; view?: string; sort?: string; sources?: string }>
 }) {
   const sp = await searchParams
-  const query = (sp.q ?? '').trim()
+  const query = (sp.q ?? '').trim().slice(0, 200)
   const view: ViewMode = sp.view === 'by-source' ? 'by-source' : 'all'
   const sort: SortKey =
     sp.sort === 'price-asc' || sp.sort === 'price-desc' ? sp.sort : 'relevance'
 
   const allAdapters = await getAdapters()
-  const enabledIds =
-    sp.sources && sp.sources.length > 0 ? new Set(sp.sources.split(',')) : null
+  const enabledIds = sp.sources
+    ? new Set(
+        sp.sources
+          .split(',')
+          .filter((id) => allAdapters.some((adapter) => adapter.id === id)),
+      )
+    : null
   const activeAdapters = enabledIds
     ? allAdapters.filter((a) => enabledIds.has(a.id))
     : allAdapters
@@ -96,7 +101,9 @@ export default async function SearchPage({
         )}
       </main>
 
-      {query && <Copilot query={query} />}
+      {query && (
+        <Copilot query={query} sourceIds={activeAdapters.map((adapter) => adapter.id)} />
+      )}
     </>
   )
 }

@@ -9,6 +9,8 @@ const TYPE_DOT: Record<string, string> = {
   ebay: 'bg-blue-400',
   etsy: 'bg-pink-400',
   bestbuy: 'bg-yellow-400',
+  amazon: 'bg-cyan-400',
+  'generic-html': 'bg-teal-400',
   mock: 'bg-fg-subtle',
 }
 
@@ -48,7 +50,9 @@ export function ListingCard({
         )}
         {/* Price chip */}
         <div className="absolute right-2 top-2 rounded-md bg-bg/85 px-2 py-1 font-mono text-[12px] font-bold text-accent-strong shadow-sm backdrop-blur-md">
-          {formatPrice(listing.priceMinor, listing.currency)}
+          {listing.priceMinor > 0
+            ? formatPrice(listing.priceMinor, listing.currency)
+            : 'Price unavailable'}
         </div>
         {/* Retailer badge (unified-view only) */}
         {showRetailerBadge && retailerLabel && (

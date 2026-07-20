@@ -11,6 +11,11 @@ import {
 } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
 import { reformulateForStore } from '@/lib/llm/requery'
+import {
+  adapterSearchKey,
+  cachedListingsForQuery,
+  dedupeListings,
+} from '@/lib/result-quality'
 import { withHardTimeout } from '@/lib/timeout'
 
 // When a live fetch fails (timeout, bot-block), serve the retailer's
@@ -46,10 +51,11 @@ export function searchAdapter(
   timeoutMs: number,
 ): Promise<AdapterSearchResult> {
   const pool = inFlight()
-  const hit = pool.get(adapter.id)
+  const key = adapterSearchKey(adapter.id, query)
+  const hit = pool.get(key)
   if (hit) return hit
   const promise = run(adapter, query, timeoutMs)
-  pool.set(adapter.id, promise)
+  pool.set(key, promise)
   return promise
 }
 
@@ -73,10 +79,12 @@ async function run(
     const searchQuery = parsed.refinedQuery || query
     // Hard ceiling on top of the AbortSignal: some adapters don't honor abort
     // and would otherwise hang every section awaiting this promise.
-    const raw = await withHardTimeout(
-      adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
-      timeoutMs + 1500,
-      `${adapter.label} search`,
+    const raw = dedupeListings(
+      await withHardTimeout(
+        adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
+        timeoutMs + 1500,
+        `${adapter.label} search`,
+      ),
     )
     let ranked = await rankByRelevance(query, raw, parsed, recallModeForType(adapter.type))
     // Demanded materials are mandatory (deterministic twin of the judge's
@@ -89,14 +97,20 @@ async function run(
     // boot" at a boot brand). Results are still ranked against the user's
     // original query, so intent can't drift. LLM-down or no suggestion →
     // we simply keep the empty first pass.
-    if (ranked.kept.length === 0 && adapter.type !== 'mock') {
+    if (
+      ranked.kept.length === 0 &&
+      adapter.type !== 'mock' &&
+      adapter.type !== 'shopify'
+    ) {
       const alt = await reformulateForStore(query, adapter.label, adapter.type)
       if (alt && alt !== searchQuery.toLowerCase()) {
         try {
-          const altRaw = await withHardTimeout(
-            adapter.search(alt, AbortSignal.timeout(timeoutMs)),
-            timeoutMs + 1500,
-            `${adapter.label} re-query`,
+          const altRaw = dedupeListings(
+            await withHardTimeout(
+              adapter.search(alt, AbortSignal.timeout(timeoutMs)),
+              timeoutMs + 1500,
+              `${adapter.label} re-query`,
+            ),
           )
           const altRanked = await rankByRelevance(
             query,
@@ -151,13 +165,19 @@ async function run(
     // pipeline, so a flaky fetch doesn't flip the store in and out of the
     // results between visits.
     try {
-      const cached = await loadRecentListings(adapter.id)
+      // Retailer history is not keyed by query. Apply a strict lexical gate
+      // before semantic ranking so a failed "running shoes" fetch cannot
+      // reuse wireless-earbud rows merely because both mention "running".
+      const cached = cachedListingsForQuery(
+        parsed.refinedQuery || query,
+        dedupeListings(await loadRecentListings(adapter.id)),
+      )
       if (cached.length > 0) {
         const ranked = await rankByRelevance(
           query,
           cached,
           parsed,
-          recallModeForType(adapter.type),
+          'strict',
         )
         ranked.kept = materialGate(query, parsed, ranked.kept)
         if (ranked.kept.length > 0) {

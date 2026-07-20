@@ -4,6 +4,7 @@ import { focusSearchHtml } from './html-focus'
 import { extractListings } from '@/lib/adapters/generic-extract'
 import { extractJsonLdListings } from '@/lib/adapters/jsonld'
 import { renderPage } from '@/lib/browser'
+import { isStorefrontUrl } from '@/lib/url-safety'
 
 const SYSTEM = `You repair a broken e-commerce scraper config.
 
@@ -35,6 +36,9 @@ async function renderRepairPages(
   searchUrlTemplate: string,
   query: string,
 ): Promise<{ homepage: string; search: { status: number; html: string } }> {
+  if (!isStorefrontUrl(searchUrlTemplate, domain, { requireQueryPlaceholder: true })) {
+    throw new Error('Unsafe search URL template')
+  }
   // Always use Playwright for repair — handles JS-heavy sites and serves
   // identical content regardless of bot fingerprinting heuristics that vary
   // between fetch and a real browser.
@@ -56,7 +60,7 @@ function truncate(html: string, max = 24000): string {
   return stripped.slice(0, max)
 }
 
-function validate(raw: unknown): GenericHtmlConfig | null {
+function validate(raw: unknown, domain: string): GenericHtmlConfig | null {
   if (!raw || typeof raw !== 'object') return null
   const obj = raw as Record<string, unknown>
   const required = [
@@ -68,7 +72,13 @@ function validate(raw: unknown): GenericHtmlConfig | null {
     'urlSelector',
   ] as const
   for (const k of required) {
-    if (typeof obj[k] !== 'string' || !(obj[k] as string).trim()) return null
+    if (
+      typeof obj[k] !== 'string' ||
+      !(obj[k] as string).trim() ||
+      (obj[k] as string).length > 500
+    ) {
+      return null
+    }
   }
   const cfg: GenericHtmlConfig = {
     searchUrlTemplate: (obj.searchUrlTemplate as string).trim(),
@@ -78,15 +88,18 @@ function validate(raw: unknown): GenericHtmlConfig | null {
     imageSelector: (obj.imageSelector as string).trim(),
     urlSelector: (obj.urlSelector as string).trim(),
   }
-  if (!cfg.searchUrlTemplate.includes('{query}')) return null
-  if (typeof obj.urlPrefix === 'string' && obj.urlPrefix.trim()) {
-    cfg.urlPrefix = obj.urlPrefix.trim().replace(/\/+$/, '')
+  if (!isStorefrontUrl(cfg.searchUrlTemplate, domain, { requireQueryPlaceholder: true })) {
+    return null
   }
-  if (typeof obj.currency === 'string' && obj.currency.trim().length === 3) {
+  if (typeof obj.urlPrefix === 'string' && obj.urlPrefix.trim()) {
+    const prefix = obj.urlPrefix.trim().replace(/\/+$/, '')
+    if (isStorefrontUrl(prefix, domain)) cfg.urlPrefix = prefix
+  }
+  if (typeof obj.currency === 'string' && /^[A-Za-z]{3}$/.test(obj.currency.trim())) {
     cfg.currency = obj.currency.trim().toUpperCase()
   }
   if (typeof obj.brandName === 'string' && obj.brandName.trim()) {
-    cfg.brandName = obj.brandName.trim()
+    cfg.brandName = obj.brandName.trim().slice(0, 100)
   }
   if (obj.requiresJs === true) cfg.requiresJs = true
   return cfg
@@ -123,7 +136,7 @@ async function askForFix(
   }
 
   try {
-    const fixed = validate(JSON.parse(json))
+    const fixed = validate(JSON.parse(json), domain)
     if (!fixed) return null
     // Repair always runs Playwright, so the new config is JS-rendered too.
     fixed.requiresJs = true

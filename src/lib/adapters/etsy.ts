@@ -1,4 +1,5 @@
 import type { Adapter, NormalizedListing } from './types'
+import { readJsonLimited } from '@/lib/http'
 
 type EtsyListing = {
   listing_id: number
@@ -38,7 +39,7 @@ export function createEtsyAdapter(id: string, label: string): Adapter | null {
       })
       if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
 
-      const data = (await res.json()) as EtsyResponse
+      const data = await readJsonLimited<EtsyResponse>(res, 3_000_000)
       return (data.results ?? []).map((l) => {
         const minor = l.price
           ? Math.round((l.price.amount / Math.max(l.price.divisor, 1)) * 100)

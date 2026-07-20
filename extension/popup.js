@@ -12,9 +12,13 @@ saveBtn.addEventListener('click', () => {
   let url = (input.value || '').trim().replace(/\/$/, '')
   if (!url) url = DEFAULT_BASE
   try {
-    // Validate
-    // eslint-disable-next-line no-new
-    new URL(url)
+    const parsed = new URL(url)
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+      throw new Error('Unsupported URL')
+    }
+    parsed.search = ''
+    parsed.hash = ''
+    url = parsed.toString().replace(/\/$/, '')
   } catch {
     status.textContent = 'Invalid URL'
     status.style.color = '#f87171'

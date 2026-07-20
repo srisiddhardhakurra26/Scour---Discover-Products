@@ -1,4 +1,5 @@
 import type { Adapter, NormalizedListing } from './types'
+import { readTextLimited } from '@/lib/http'
 
 // Real Amazon adapter — scrapes the public search page. No API, no key. Will
 // occasionally be served a bot-check page instead of results; we detect that
@@ -128,7 +129,7 @@ export function createAmazonAdapter(id: string, label: string): Adapter {
       })
       if (!res.ok) throw new Error(`Amazon: HTTP ${res.status}`)
 
-      const html = await res.text()
+      const html = await readTextLimited(res, 6_000_000)
       if (isBotChallenge(html)) throw new Error('Amazon: bot challenge')
 
       return parseSearchHtml(html).slice(0, 12)

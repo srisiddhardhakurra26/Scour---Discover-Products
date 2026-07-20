@@ -28,8 +28,9 @@ export async function imageDHash(input: Buffer): Promise<string> {
   return hash.toString(16).padStart(16, '0')
 }
 
-/** Hamming distance between two dHash hex strings (0–64). */
+/** Hamming distance between two dHash hex strings (0–64; 65 when invalid). */
 export function hammingDistance(a: string, b: string): number {
+  if (!/^[0-9a-f]{16}$/i.test(a) || !/^[0-9a-f]{16}$/i.test(b)) return 65
   let x = BigInt(`0x${a}`) ^ BigInt(`0x${b}`)
   let count = 0
   while (x > 0n) {
@@ -43,6 +44,12 @@ export function hammingDistance(a: string, b: string): number {
  * and resizing, which moves a dHash by a few bits at most. */
 export const HASH_MATCH_MAX_DISTANCE = 6
 
+export function isUsefulHash(hash: string): boolean {
+  if (!/^[0-9a-f]{16}$/i.test(hash)) return false
+  const ones = hammingDistance(hash, '0000000000000000')
+  return ones >= 4 && ones <= 60
+}
+
 export function hashesMatch(a: string, b: string): boolean {
-  return hammingDistance(a, b) <= HASH_MATCH_MAX_DISTANCE
+  return isUsefulHash(a) && isUsefulHash(b) && hammingDistance(a, b) <= HASH_MATCH_MAX_DISTANCE
 }

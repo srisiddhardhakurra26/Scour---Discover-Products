@@ -1,4 +1,6 @@
 import type { Adapter, NormalizedListing } from './types'
+import { normalizeStorefrontDomain } from '@/lib/url-safety'
+import { readJsonLimited } from '@/lib/http'
 
 type ShopifyVariant = {
   price?: string | number | null
@@ -137,7 +139,7 @@ async function fetchCatalog(
     throw new Error(`${label}: HTTP ${res.status}${hint}`)
   }
 
-  const data = (await res.json()) as ProductsResponse
+  const data = await readJsonLimited<ProductsResponse>(res, 12_000_000)
   return data.products ?? []
 }
 
@@ -181,6 +183,9 @@ function revalidateCatalog(base: string, label: string, limit: number): void {
  * cold fetch against the adapter timeout. No-op when already fresh.
  */
 export async function prewarmShopifyCatalog(domain: string, label?: string): Promise<number> {
+  if (normalizeStorefrontDomain(domain) !== domain.toLowerCase()) {
+    throw new Error('Invalid Shopify storefront domain')
+  }
   const base = baseOf(domain)
   const hit = catalogCache.get(base)
   if (hit && Date.now() - hit.fetchedAt < CATALOG_FRESH_MS) return hit.products.length

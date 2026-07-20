@@ -1,4 +1,6 @@
 import type { Browser, BrowserContext, Page } from 'playwright'
+import { assertSafeRemoteUrl, isSafeRemoteUrl } from './url-safety'
+import { envFlag } from './env'
 
 // Lazy, process-wide Chromium instance. We launch once on first use and
 // reuse the browser across requests; only the per-request context is
@@ -17,7 +19,7 @@ async function getBrowser(): Promise<Browser> {
           '--disable-dev-shm-usage',
           // The container runs as root, where Chromium refuses to start unless
           // the sandbox is disabled. Opt-in via env so local dev keeps it on.
-          ...(process.env.PLAYWRIGHT_NO_SANDBOX ? ['--no-sandbox'] : []),
+          ...(envFlag(process.env.PLAYWRIGHT_NO_SANDBOX) ? ['--no-sandbox'] : []),
         ],
       })
     })()
@@ -60,6 +62,7 @@ async function renderInternal(
   timeoutMs: number,
   screenshot: boolean,
 ): Promise<RenderedPage & { screenshot?: Buffer }> {
+  await assertSafeRemoteUrl(url)
   const browser = await getBrowser()
   let context: BrowserContext | null = null
   let page: Page | null = null
@@ -69,6 +72,33 @@ async function renderInternal(
       viewport: { width: 1366, height: 900 },
       locale: 'en-US',
       timezoneId: 'America/New_York',
+    })
+    const hostChecks = new Map<string, Promise<boolean>>()
+    await context.route('**/*', async (route) => {
+      const requestUrl = route.request().url()
+      if (!requestUrl.startsWith('http:') && !requestUrl.startsWith('https:')) {
+        if (/^(?:about|blob|data):/.test(requestUrl)) await route.continue()
+        else await route.abort('blockedbyclient')
+        return
+      }
+      if (!isSafeRemoteUrl(requestUrl)) {
+        await route.abort('blockedbyclient')
+        return
+      }
+      const origin = new URL(requestUrl).origin
+      let hostCheck = hostChecks.get(origin)
+      if (!hostCheck) {
+        hostCheck = assertSafeRemoteUrl(origin).then(
+          () => true,
+          () => false,
+        )
+        hostChecks.set(origin, hostCheck)
+      }
+      if (!(await hostCheck)) {
+        await route.abort('blockedbyclient')
+        return
+      }
+      await route.continue()
     })
     page = await context.newPage()
     const response = await page.goto(url, {
@@ -80,7 +110,7 @@ async function renderInternal(
     // tracking pings).
     await page.waitForLoadState('load', { timeout: timeoutMs }).catch(() => {})
     await page.waitForTimeout(1500)
-    const initialHtml = await page.content()
+    const initialHtml = (await page.content()).slice(0, 6_000_000)
     return {
       status: response?.status() ?? 0,
       html: initialHtml,

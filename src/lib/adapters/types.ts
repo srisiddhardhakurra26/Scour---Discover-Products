@@ -15,7 +15,7 @@ export type NormalizedListing = {
    * Retailer-provided attribute text (product type, tags, description
    * snippet). Fed to the LLM relevance judge as evidence for demanded
    * attributes ("leather", "wireless") that bare-SKU titles never state.
-   * Not persisted; only used at search time.
+   * Persisted as supporting evidence for cached results and future searches.
    */
   detailsText?: string
   raw?: unknown

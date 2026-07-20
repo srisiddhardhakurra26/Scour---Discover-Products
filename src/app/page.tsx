@@ -19,6 +19,8 @@ const TYPE_BADGE: Record<string, string> = {
   ebay: 'bg-blue-400/10 text-blue-300',
   etsy: 'bg-pink-400/10 text-pink-300',
   bestbuy: 'bg-yellow-400/10 text-yellow-300',
+  amazon: 'bg-cyan-400/10 text-cyan-300',
+  'generic-html': 'bg-teal-400/10 text-teal-300',
   mock: 'bg-fg-subtle/10 text-fg-muted',
 }
 
@@ -33,8 +35,7 @@ const TRENDING = [
 ]
 
 export default async function Home() {
-  const [retailers, listings, products, adapters] = await Promise.all([
-    prisma.retailer.count({ where: { enabled: true } }),
+  const [listings, products, adapters] = await Promise.all([
     prisma.listing.count(),
     prisma.product.count(),
     getAdapters(),
@@ -92,7 +93,7 @@ export default async function Home() {
 
         {/* Stats */}
         <section className="grid grid-cols-3 gap-px overflow-hidden rounded-2xl border border-border bg-border">
-          <Stat label="Sources enabled" value={retailers} />
+          <Stat label="Sources enabled" value={adapters.length} />
           <Stat label="Listings tracked" value={listings} />
           <Stat label="Products clustered" value={products} />
         </section>

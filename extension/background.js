@@ -4,7 +4,13 @@ const DEFAULT_BASE = 'http://localhost:3000'
 
 async function getBaseUrl() {
   const { scourBaseUrl } = await chrome.storage.sync.get({ scourBaseUrl: DEFAULT_BASE })
-  return String(scourBaseUrl || DEFAULT_BASE).replace(/\/$/, '')
+  const parsed = new URL(String(scourBaseUrl || DEFAULT_BASE))
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error('The configured Scour URL is invalid.')
+  }
+  parsed.search = ''
+  parsed.hash = ''
+  return parsed.toString().replace(/\/$/, '')
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -14,6 +20,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       const base = await getBaseUrl()
       const res = await fetch(`${base}/api/lookup`, {
+        signal: AbortSignal.timeout(30_000),
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(message.payload ?? {}),

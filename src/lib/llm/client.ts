@@ -1,3 +1,5 @@
+import { fetchSafeRemote } from '@/lib/url-safety'
+
 // Minimal multi-provider LLM client. Tries Groq first (fastest free tier),
 // falls back to Gemini if Groq is unavailable or rate-limited. Both providers
 // support JSON-mode output, which is what every Scour agent uses.
@@ -119,7 +121,9 @@ export async function generateJson(
 ): Promise<string> {
   const errors: string[] = []
   try {
-    return await tryGroq(opts, signal)
+    const groqBudgetMs = opts.tier === 'reasoning' ? 6_000 : 2_500
+    const groqSignal = AbortSignal.any([signal, AbortSignal.timeout(groqBudgetMs)])
+    return await tryGroq(opts, groqSignal)
   } catch (err) {
     errors.push(err instanceof Error ? err.message : String(err))
   }
@@ -193,7 +197,7 @@ export async function fetchInlineImage(
   maxBytes = 600_000,
 ): Promise<InlineImage | null> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    const res = await fetchSafeRemote(url, { signal: AbortSignal.timeout(timeoutMs) })
     if (!res.ok) return null
     const mimeType = res.headers.get('content-type')?.split(';')[0]?.trim() ?? ''
     if (!/^image\/(jpeg|png|webp|gif)$/.test(mimeType)) return null
@@ -330,11 +334,19 @@ export async function* streamText(
   opts: ChatOptions = { tier: 'fast' },
   signal: AbortSignal = AbortSignal.timeout(30_000),
 ): AsyncGenerator<string> {
+  let yielded = false
   try {
-    yield* streamGroqText(messages, opts, signal)
+    const groqSignal = AbortSignal.any([signal, AbortSignal.timeout(8_000)])
+    for await (const delta of streamGroqText(messages, opts, groqSignal)) {
+      yielded = true
+      yield delta
+    }
     return
   } catch (err) {
-    console.error('[copilot] groq stream failed, falling back to gemini:', err)
+    // Falling back after streaming partial text would append a second answer.
+    // Let the route close with its graceful unavailable message instead.
+    if (yielded) throw err
+    console.warn('[copilot] groq stream failed, falling back to gemini:', err)
   }
   yield await geminiText(messages, opts, signal)
 }

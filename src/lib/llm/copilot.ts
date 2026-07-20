@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db'
 import { formatPrice } from '@/lib/format'
+import { clusterHasTokenOverlap } from '@/lib/text'
 
 export const COPILOT_SYSTEM = `You are Scour Copilot, a concise shopping assistant inside Scour — a tool that finds the same product across many stores and compares prices side by side.
 
@@ -11,13 +12,6 @@ Rules:
 - Never invent prices, specs, retailers, or reviews that aren't in the context.
 - When you name a product, use its real title from the context. Prefer the cheapest option unless the user signals other priorities.`
 
-function tokenize(q: string): string[] {
-  return q
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((t) => t.length >= 3)
-}
-
 /**
  * Compact, text-only description of the products currently compared for a
  * query, used to ground the Copilot. Pulls the most recently clustered
@@ -25,28 +19,40 @@ function tokenize(q: string): string[] {
  * overlap the query — a lightweight relevance pass that avoids re-running the
  * embedding ranker. Best-effort: returns a short note if nothing matches.
  */
-export async function buildCopilotContext(query: string): Promise<string> {
-  const products = await prisma.product.findMany({
-    where: { retailerCount: { gte: 2 } },
+export async function buildCopilotContext(
+  query: string,
+  retailerIds?: string[],
+): Promise<string> {
+  const listingWhere = {
+    retailer: { is: { enabled: true } },
+    ...(retailerIds ? { retailerId: { in: retailerIds } } : {}),
+  }
+  const candidates = await prisma.product.findMany({
+    where: { listings: { some: listingWhere } },
     include: {
       listings: {
+        where: listingWhere,
         orderBy: { priceMinor: 'asc' },
-        include: { retailer: { select: { label: true, type: true } } },
+        include: { retailer: { select: { id: true, label: true, type: true } } },
       },
     },
     orderBy: { lastSeenAt: 'desc' },
     take: 30,
   })
 
-  const tokens = tokenize(query)
-  const relevant = (
-    tokens.length === 0
-      ? products
-      : products.filter((p) => {
-          const hay = `${p.canonicalTitle} ${p.listings.map((l) => l.title).join(' ')}`.toLowerCase()
-          return tokens.some((t) => hay.includes(t))
-        })
-  ).slice(0, 8)
+  const products = candidates.filter(
+    (product) => new Set(product.listings.map((listing) => listing.retailer.id)).size >= 2,
+  )
+  const relevant = products
+    .filter((product) =>
+      query
+        ? clusterHasTokenOverlap(query, [
+            product.canonicalTitle,
+            ...product.listings.map((listing) => listing.title),
+          ])
+        : true,
+    )
+    .slice(0, 8)
 
   if (relevant.length === 0) {
     return query
@@ -55,20 +61,30 @@ export async function buildCopilotContext(query: string): Promise<string> {
   }
 
   const lines = relevant.map((p, i) => {
-    const prices = p.listings.map((l) => l.priceMinor).filter((n) => n > 0)
-    const currency = p.listings[0]?.currency ?? 'USD'
-    const lo = prices.length ? Math.min(...prices) : 0
-    const hi = prices.length ? Math.max(...prices) : 0
+    const byCurrency = new Map<string, number[]>()
+    for (const listing of p.listings) {
+      if (listing.priceMinor <= 0) continue
+      const prices = byCurrency.get(listing.currency) ?? []
+      prices.push(listing.priceMinor)
+      byCurrency.set(listing.currency, prices)
+    }
     const range =
-      prices.length === 0
+      byCurrency.size === 0
         ? 'price n/a'
-        : lo === hi
-          ? formatPrice(lo, currency)
-          : `${formatPrice(lo, currency)}–${formatPrice(hi, currency)}`
+        : [...byCurrency.entries()]
+            .map(([currency, prices]) => {
+              const lo = Math.min(...prices)
+              const hi = Math.max(...prices)
+              return lo === hi
+                ? formatPrice(lo, currency)
+                : `${formatPrice(lo, currency)}–${formatPrice(hi, currency)}`
+            })
+            .join(', ')
     const stores = [...new Set(p.listings.map((l) => l.retailer.label ?? l.retailer.type))]
       .slice(0, 5)
       .join(', ')
-    return `${i + 1}. ${p.canonicalTitle} — ${range} across ${p.retailerCount} stores (${stores})`
+    const storeCount = new Set(p.listings.map((listing) => listing.retailer.id)).size
+    return `${i + 1}. ${p.canonicalTitle} — ${range} across ${storeCount} stores (${stores})`
   })
 
   return `Products currently compared${query ? ` for "${query}"` : ''}:\n${lines.join('\n')}`

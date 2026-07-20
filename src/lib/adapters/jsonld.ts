@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio'
 import type { NormalizedListing } from './types'
+import { isStorefrontUrl, resolveSafeHttpUrl } from '@/lib/url-safety'
 
 // schema.org/Product structured data, when a store embeds it on its search
 // results page, gives exact title/price/availability with zero selector
@@ -107,11 +108,6 @@ function parseOffers(offers: JsonValue | undefined): OfferInfo {
   return { priceMinor, currency, availability: parseAvailability(offers.availability) }
 }
 
-function absoluteUrl(url: string, domain: string): string {
-  if (/^https?:\/\//i.test(url)) return url
-  return `https://${domain}${url.startsWith('/') ? '' : '/'}${url}`
-}
-
 /**
  * Extract product listings from JSON-LD blocks in a page. Same bar as the
  * selector-based extractor: a product is only emitted with both a title and a
@@ -148,7 +144,8 @@ export function extractJsonLdListings(
     const title = firstString(p.name)
     const rawUrl = firstString(p.url) ?? firstString(p['@id'])
     if (!title || !rawUrl) continue
-    const url = absoluteUrl(rawUrl, domain)
+    const url = resolveSafeHttpUrl(rawUrl, `https://${domain}/`)
+    if (!url || !isStorefrontUrl(url, domain)) continue
     if (seen.has(url)) continue
     seen.add(url)
 
@@ -161,7 +158,7 @@ export function extractJsonLdListings(
       externalId: url,
       title,
       url,
-      imageUrl: image ? absoluteUrl(image, domain) : undefined,
+      imageUrl: resolveSafeHttpUrl(image, `https://${domain}/`),
       priceMinor: offer.priceMinor,
       currency: offer.currency ?? currencyFallback,
       availability: offer.availability,

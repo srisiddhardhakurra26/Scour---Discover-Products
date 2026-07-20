@@ -30,26 +30,27 @@ const seeds: Seed[] = [
   { type: 'amazon', identifier: 'amazon', label: 'Amazon', enabled: true },
 
   // Mocks (for clustering demo)
-  { type: 'mock', identifier: 'mock-ebay', label: 'eBay (mock)', enabled: true },
-  // Disabled: replaced by the real Amazon adapter above.
+  // Demo-only sources stay off once real marketplace adapters are present.
+  { type: 'mock', identifier: 'mock-ebay', label: 'eBay (mock)', enabled: false },
   { type: 'mock', identifier: 'mock-amazon', label: 'Amazon (mock)', enabled: false },
 ]
 
 async function main() {
   for (const s of seeds) {
-    await prisma.retailer.upsert({
+    const retailer = await prisma.retailer.upsert({
       where: { type_identifier: { type: s.type, identifier: s.identifier } },
-      update: { label: s.label, enabled: s.enabled },
+      // Preserve the user's source toggles across restarts. Demo mocks are the
+      // sole exception: they must stay off in a real installation.
+      update: s.type === 'mock' ? { label: s.label, enabled: false } : { label: s.label },
       create: { type: s.type, identifier: s.identifier, label: s.label, enabled: s.enabled },
     })
-    console.log(`✓ ${s.label} (${s.type}/${s.identifier}) enabled=${s.enabled}`)
+    console.log(`✓ ${s.label} (${s.type}/${s.identifier}) enabled=${retailer.enabled}`)
   }
 
-  // Purge listings tied to retailers that are now disabled. Without this,
-  // clusters keep pointing at stale data (e.g. mock-amazon search URLs after
-  // we switched to the real Amazon scraper).
+  // Remove demo data only. Disabling a real source is a reversible preference
+  // and must not erase its history on the next restart.
   const disabled = await prisma.retailer.findMany({
-    where: { enabled: false },
+    where: { enabled: false, type: 'mock' },
     select: { id: true, label: true },
   })
   if (disabled.length > 0) {
@@ -57,7 +58,7 @@ async function main() {
       where: { retailerId: { in: disabled.map((r) => r.id) } },
     })
     if (purged.count > 0) {
-      console.log(`✓ purged ${purged.count} listings from ${disabled.length} disabled retailer(s)`)
+      console.log(`✓ purged ${purged.count} mock listings`)
     }
     // Drop products that no longer have any listings.
     const orphans = await prisma.product.findMany({

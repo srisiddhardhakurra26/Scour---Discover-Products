@@ -13,16 +13,39 @@ import { createBestBuyAdapter } from './bestbuy'
 import { createAmazonAdapter } from './amazon'
 import { createGenericHtmlAdapter } from './generic-html'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
+import { isStorefrontUrl, normalizeStorefrontDomain } from '@/lib/url-safety'
 
 export const ADAPTER_TIMEOUT_MS = 4000
+
+function validGenericConfig(config: GenericHtmlConfig, domain: string): boolean {
+  if (
+    config.searchUrlTemplate.length > 2_000 ||
+    !isStorefrontUrl(config.searchUrlTemplate, domain, {
+      requireQueryPlaceholder: true,
+    }) ||
+    (config.urlPrefix !== undefined && !isStorefrontUrl(config.urlPrefix, domain))
+  ) {
+    return false
+  }
+  if (config.extraction === 'jsonld') return true
+  return [
+    config.productSelector,
+    config.titleSelector,
+    config.priceSelector,
+    config.imageSelector,
+    config.urlSelector,
+  ].every((selector) => typeof selector === 'string' && selector.length > 0 && selector.length <= 500)
+}
 
 function buildAdapter(r: Retailer): Adapter | null {
   const label = r.label ?? r.identifier
 
   if (r.type === 'shopify') {
+    if (normalizeStorefrontDomain(r.identifier) !== r.identifier.toLowerCase()) return null
     return createShopifyAdapter({ id: r.id, label, domain: r.identifier })
   }
   if (r.type === 'woocommerce') {
+    if (normalizeStorefrontDomain(r.identifier) !== r.identifier.toLowerCase()) return null
     return createWooCommerceAdapter({ id: r.id, label, domain: r.identifier })
   }
   if (r.type === 'reddit') {
@@ -46,6 +69,7 @@ function buildAdapter(r: Retailer): Adapter | null {
   if (r.type === 'generic-html' && r.config) {
     try {
       const config = JSON.parse(r.config) as GenericHtmlConfig
+      if (!validGenericConfig(config, r.identifier)) return null
       return createGenericHtmlAdapter(r.id, label, r.identifier, config)
     } catch {
       return null

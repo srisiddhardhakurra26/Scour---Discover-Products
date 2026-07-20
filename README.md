@@ -35,6 +35,7 @@ Discover products across major shopping platforms and compare them side by side 
 ## Quick start
 
 ```bash
+nvm use                 # Node 22.22.0 (see .nvmrc)
 npm install
 cp .env.example .env   # add whichever keys you have — missing ones are skipped, not fatal
 npx prisma migrate dev
@@ -78,8 +79,8 @@ None are required to boot — adapters and features degrade gracefully when a ke
 | `BESTBUY_API_KEY`                          | Best Buy adapter                                                   |
 | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`| Reddit adapter via official OAuth API (falls back to public JSON) |
 | `GROQ_API_KEY` / `GEMINI_API_KEY`          | LLM layer: query parsing, source onboarding/repair, cluster judging, copilot chat (Groq first, Gemini fallback) |
-| `WATCHDOG_DISABLED` / `WATCHDOG_INTERVAL_MS` | Toggle/tune the daily source-health watchdog                    |
-| `ENRICH_DISABLED` / `ENRICH_OCR_DISABLED`  | Toggle background image-hash / OCR enrichment                     |
+| `WATCHDOG_DISABLED` / `WATCHDOG_INTERVAL_MS` | Disable with `1`/`true`; tune the daily source-health watchdog in milliseconds |
+| `ENRICH_DISABLED` / `ENRICH_OCR_DISABLED`  | Disable background image-hash / OCR enrichment with `1`/`true`     |
 | `DATABASE_URL`                             | Override the SQLite location (defaults to a local file)           |
 | `MCP_API_KEY`                              | Bearer-token auth on `/api/mcp` (open when unset)                 |
 

@@ -1,4 +1,5 @@
 import type { Adapter, NormalizedListing } from './types'
+import { readTextLimited } from '@/lib/http'
 
 // Scrape-based eBay adapter. eBay refuses to serve the search page to a
 // request that doesn't carry session cookies, so we visit the homepage once
@@ -160,7 +161,7 @@ export function createEbayAdapter(id: string, label: string): Adapter {
         throw new Error(`eBay: HTTP ${res.status}`)
       }
 
-      const html = await res.text()
+      const html = await readTextLimited(res, 6_000_000)
       if (html.length < 5000 && html.includes('Error Page')) {
         cookieCache = null
         throw new Error('eBay: blocked')

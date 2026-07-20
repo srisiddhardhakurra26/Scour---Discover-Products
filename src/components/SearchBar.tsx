@@ -39,6 +39,7 @@ export function SearchBar({
       <input
         type="search"
         name="q"
+        maxLength={200}
         defaultValue={defaultValue}
         placeholder={placeholder}
         autoComplete="off"

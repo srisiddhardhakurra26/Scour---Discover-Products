@@ -18,10 +18,10 @@ async function getWishlist() {
     include: {
       listings: {
         include: {
-          retailer: { select: { label: true, type: true } },
+          retailer: { select: { id: true, label: true, type: true } },
           prices: {
-            orderBy: { capturedAt: 'asc' },
-            select: { priceMinor: true, capturedAt: true },
+            orderBy: { capturedAt: 'desc' },
+            select: { priceMinor: true, capturedAt: true, currency: true },
             take: 60,
           },
         },
@@ -102,14 +102,18 @@ function WishlistCard({
 }) {
   // Cheapest listing per retailer.
   const dedupedMap = new Map<string, WishlistProduct['listings'][number]>()
-  for (const l of [...product.listings].sort((a, b) => a.priceMinor - b.priceMinor)) {
-    const key = (l.retailer.label ?? l.retailer.type).toLowerCase()
+  for (const l of [...product.listings].sort((a, b) => {
+    const ap = a.priceMinor > 0 ? a.priceMinor : Number.MAX_SAFE_INTEGER
+    const bp = b.priceMinor > 0 ? b.priceMinor : Number.MAX_SAFE_INTEGER
+    return ap - bp
+  })) {
+    const key = l.retailer.id
     if (!dedupedMap.has(key)) dedupedMap.set(key, l)
   }
   const deduped = [...dedupedMap.values()]
   const lowest = deduped[0]
   const currency = lowest?.currency ?? 'USD'
-  const trend = minPriceTrend(product.listings)
+  const trend = minPriceTrend(product.listings, currency)
   const targetHit =
     alertBelowMinor != null &&
     lowest != null &&
@@ -180,7 +184,7 @@ function WishlistCard({
               <span
                 className={`shrink-0 font-mono font-bold tabular-nums ${i === 0 ? 'text-accent-strong' : 'text-fg-muted'}`}
               >
-                {formatPrice(l.priceMinor, l.currency)}
+                {l.priceMinor > 0 ? formatPrice(l.priceMinor, l.currency) : 'unavailable'}
               </span>
             </a>
           </li>

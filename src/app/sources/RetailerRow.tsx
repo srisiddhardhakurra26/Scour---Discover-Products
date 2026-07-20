@@ -21,6 +21,7 @@ const DOT_COLOR: Record<string, string> = {
   repaired: 'bg-success',
   blocked: 'bg-warn',
   empty: 'bg-fg-subtle',
+  unreachable: 'bg-warn',
   stale: 'bg-danger',
   'repair-failed': 'bg-danger',
   'config-error': 'bg-danger',

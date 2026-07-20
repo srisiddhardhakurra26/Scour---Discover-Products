@@ -1,5 +1,6 @@
 import Parser from 'rss-parser'
 import type { Adapter, NormalizedListing } from './types'
+import { readTextLimited } from '@/lib/http'
 
 type SlickdealsItem = {
   contentEncoded?: string
@@ -57,7 +58,7 @@ export function createSlickdealsAdapter(id: string, label: string): Adapter {
       })
       if (!res.ok) throw new Error(`Slickdeals: HTTP ${res.status}`)
 
-      const xml = await res.text()
+      const xml = await readTextLimited(res, 2_000_000)
       const feed = await parser.parseString(xml)
 
       return (feed.items ?? []).slice(0, 15).map((item, i) => {

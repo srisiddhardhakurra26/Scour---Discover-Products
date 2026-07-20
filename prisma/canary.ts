@@ -27,6 +27,7 @@ const ICON: Record<string, string> = {
   'repair-failed': '✗',
   blocked: '🚫',
   empty: '∅',
+  unreachable: '!',
   'config-error': '⚠',
 }
 
@@ -51,7 +52,9 @@ async function main() {
 
   const repaired = reports.filter((r) => r.status === 'repaired').length
   const needsAttention = reports.filter((r) =>
-    ['stale', 'repair-failed', 'blocked', 'empty', 'config-error'].includes(r.status),
+    ['stale', 'repair-failed', 'blocked', 'empty', 'unreachable', 'config-error'].includes(
+      r.status,
+    ),
   ).length
 
   console.log(

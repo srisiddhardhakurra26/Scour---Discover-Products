@@ -7,23 +7,19 @@ import { repairGenericAdapter } from '@/lib/llm/adapter-repair'
 import type { GenericHtmlConfig } from '@/lib/llm/source-onboarder'
 import { getAdapterById } from '@/lib/adapters/registry'
 import { formatPrice } from '@/lib/format'
+import { dedupeListings } from '@/lib/result-quality'
+import {
+  assertSafeRemoteUrl,
+  fetchSafeRemote,
+  normalizeStorefrontDomain,
+} from '@/lib/url-safety'
+import { readJsonLimited } from '@/lib/http'
 
 const REALISTIC_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
 
-function normalizeDomain(input: string): string | null {
-  const trimmed = input.trim().toLowerCase()
-  if (!trimmed) return null
-
-  let host: string
-  try {
-    const u = trimmed.startsWith('http') ? new URL(trimmed) : new URL(`https://${trimmed}`)
-    host = u.hostname
-  } catch {
-    return null
-  }
-  if (!host.includes('.')) return null
-  return host
+function validId(id: string): boolean {
+  return id.length > 0 && id.length <= 128 && /^[A-Za-z0-9_-]+$/.test(id)
 }
 
 type DetectResult =
@@ -37,14 +33,16 @@ async function detectStoreType(domain: string): Promise<DetectResult> {
     'user-agent': REALISTIC_UA,
   }
 
+  let shopifyStatus: number | null = null
   // Try Shopify first
   try {
-    const res = await fetch(`https://${domain}/products.json?limit=1`, {
+    const res = await fetchSafeRemote(`https://${domain}/products.json?limit=1`, {
       signal: AbortSignal.timeout(6000),
       headers,
     })
+    shopifyStatus = res.status
     if (res.ok) {
-      const data = (await res.json()) as { products?: unknown }
+      const data = await readJsonLimited<{ products?: unknown }>(res, 1_000_000)
       if (Array.isArray(data.products)) return { ok: true, type: 'shopify' }
     }
   } catch {
@@ -53,31 +51,24 @@ async function detectStoreType(domain: string): Promise<DetectResult> {
 
   // Fall back to WooCommerce Store API
   try {
-    const res = await fetch(`https://${domain}/wp-json/wc/store/v1/products?per_page=1`, {
+    const res = await fetchSafeRemote(`https://${domain}/wp-json/wc/store/v1/products?per_page=1`, {
       signal: AbortSignal.timeout(6000),
       headers,
     })
     if (res.ok) {
-      const data = await res.json()
+      const data = await readJsonLimited<unknown>(res, 1_000_000)
       if (Array.isArray(data)) return { ok: true, type: 'woocommerce' }
     }
   } catch {
     // ignore
   }
 
-  // Final check: was Shopify blocked specifically? Give a more useful message.
-  try {
-    const res = await fetch(`https://${domain}/products.json?limit=1`, {
-      signal: AbortSignal.timeout(6000),
-      headers,
-    })
-    if (res.status === 403) {
-      return {
-        ok: false,
-        message: 'Storefront is blocking automated requests (Cloudflare / bot protection).',
-      }
+  if (shopifyStatus === 403) {
+    return {
+      ok: false,
+      message: 'Storefront is blocking automated requests (Cloudflare / bot protection).',
     }
-  } catch {}
+  }
 
   return {
     ok: false,
@@ -90,9 +81,15 @@ export async function addStoreRetailer(
   formData: FormData,
 ): Promise<{ error?: string; ok?: boolean }> {
   const raw = String(formData.get('domain') ?? '')
-  const labelRaw = String(formData.get('label') ?? '').trim()
-  const domain = normalizeDomain(raw)
+  const labelRaw = String(formData.get('label') ?? '').trim().slice(0, 80)
+  const domain = normalizeStorefrontDomain(raw)
   if (!domain) return { error: 'Enter a valid domain (e.g. allbirds.com).' }
+
+  try {
+    await assertSafeRemoteUrl(`https://${domain}/`)
+  } catch {
+    return { error: 'That domain is unavailable or resolves to a private network.' }
+  }
 
   const detect = await detectStoreType(domain)
 
@@ -155,12 +152,18 @@ export async function addStoreRetailer(
 }
 
 export async function toggleRetailer(id: string, enabled: boolean) {
+  if (!validId(id) || typeof enabled !== 'boolean') throw new Error('Invalid source update.')
   await prisma.retailer.update({ where: { id }, data: { enabled } })
   revalidatePath('/sources')
   revalidatePath('/')
 }
 
 export async function removeRetailer(id: string) {
+  if (!validId(id)) throw new Error('Invalid source.')
+  const retailer = await prisma.retailer.findUnique({ where: { id }, select: { type: true } })
+  if (!retailer || !['shopify', 'woocommerce', 'generic-html'].includes(retailer.type)) {
+    throw new Error('Only user-added storefronts can be removed.')
+  }
   await prisma.retailer.delete({ where: { id } })
   revalidatePath('/sources')
   revalidatePath('/')
@@ -183,7 +186,8 @@ export async function diagnoseRetailer(
   id: string,
   sampleQuery: string,
 ): Promise<DiagnoseResult> {
-  const query = sampleQuery.trim()
+  if (!validId(id)) return { ok: false, error: 'Invalid source.' }
+  const query = sampleQuery.trim().slice(0, 200)
   if (!query) return { ok: false, error: 'Provide a sample search query.' }
 
   const adapter = await getAdapterById(id)
@@ -191,7 +195,9 @@ export async function diagnoseRetailer(
 
   const started = performance.now()
   try {
-    const listings = await adapter.search(query, AbortSignal.timeout(20_000))
+    const listings = dedupeListings(
+      await adapter.search(query, AbortSignal.timeout(20_000)),
+    )
     const elapsedMs = Math.round(performance.now() - started)
     return {
       ok: true,
@@ -216,7 +222,8 @@ export async function repairRetailer(
   id: string,
   sampleQuery: string,
 ): Promise<{ ok?: boolean; error?: string }> {
-  const trimmedQuery = sampleQuery.trim()
+  if (!validId(id)) return { error: 'Invalid source.' }
+  const trimmedQuery = sampleQuery.trim().slice(0, 200)
   if (!trimmedQuery) return { error: 'Provide a sample search query to test against.' }
 
   const retailer = await prisma.retailer.findUnique({ where: { id } })

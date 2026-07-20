@@ -3,6 +3,8 @@ import { prisma } from './db'
 import { updateProductAggregates } from './cluster'
 import { ocrImageText } from './ocr'
 import { hashesMatch, imageDHash } from './phash'
+import { fetchSafeRemote } from './url-safety'
+import { envFlag } from './env'
 
 // Background image enrichment: one fetch of a listing's product photo feeds
 // two signals — a perceptual hash (clustering, ADR-009) and OCR'd spec text.
@@ -19,7 +21,7 @@ const IMAGE_TIMEOUT_MS = 5000
 const IMAGE_MAX_BYTES = 3_000_000
 
 export function enqueueEnrichment(listingIds: string[]): void {
-  if (process.env.ENRICH_DISABLED) return
+  if (envFlag(process.env.ENRICH_DISABLED)) return
   for (const id of listingIds) {
     if (attempted.has(id) || queue.includes(id)) continue
     if (queue.length >= MAX_QUEUE) break
@@ -49,7 +51,7 @@ async function drain(): Promise<void> {
 
 async function fetchImage(url: string): Promise<Buffer | null> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) })
+    const res = await fetchSafeRemote(url, { signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) })
     if (!res.ok) return null
     if (!res.headers.get('content-type')?.startsWith('image/')) return null
     const len = Number(res.headers.get('content-length') ?? 0)
@@ -77,7 +79,7 @@ async function enrichOne(id: string): Promise<void> {
 
   const needHash = !listing.imageHash
   // ocrText null = never attempted; '' = attempted, image had no usable text.
-  const needOcr = listing.ocrText === null && !process.env.ENRICH_OCR_DISABLED
+  const needOcr = listing.ocrText === null && !envFlag(process.env.ENRICH_OCR_DISABLED)
   if (!needHash && !needOcr) return
 
   const image = await fetchImage(listing.imageUrl)

@@ -8,17 +8,25 @@ function textOf(el) {
 
 function parsePriceToMinor(raw) {
   if (!raw) return null
-  const cleaned = String(raw).replace(/[^0-9.,]/g, '')
-  if (!cleaned) return null
-  // Prefer last comma/dot as decimal separator heuristics for US pages
-  let n
-  if (cleaned.includes(',') && cleaned.includes('.')) {
-    n = parseFloat(cleaned.replace(/,/g, ''))
-  } else if (cleaned.includes(',') && /^\d+,\d{2}$/.test(cleaned)) {
-    n = parseFloat(cleaned.replace(',', '.'))
+  const match = String(raw).match(/(\d[\d\s.,'’]*)/)
+  if (!match) return null
+  const cleaned = match[1].replace(/[\s'’]/g, '').replace(/[.,]+$/, '')
+  const lastDot = cleaned.lastIndexOf('.')
+  const lastComma = cleaned.lastIndexOf(',')
+  const separator = Math.max(lastDot, lastComma)
+  const digitsAfter = separator >= 0 ? cleaned.length - separator - 1 : 0
+  const hasDecimal =
+    (lastDot >= 0 && lastComma >= 0) || digitsAfter === 1 || digitsAfter === 2
+  let normalized
+  if (hasDecimal) {
+    normalized =
+      cleaned.slice(0, separator).replace(/[.,]/g, '') +
+      '.' +
+      cleaned.slice(separator + 1).replace(/[.,]/g, '')
   } else {
-    n = parseFloat(cleaned.replace(/,/g, ''))
+    normalized = cleaned.replace(/[.,]/g, '')
   }
+  const n = Number(normalized)
   if (!Number.isFinite(n) || n <= 0) return null
   return Math.round(n * 100)
 }

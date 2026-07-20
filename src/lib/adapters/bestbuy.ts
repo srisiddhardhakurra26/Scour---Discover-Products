@@ -1,4 +1,5 @@
 import type { Adapter, NormalizedListing } from './types'
+import { readJsonLimited } from '@/lib/http'
 
 type BestBuyProduct = {
   sku: number | string
@@ -46,7 +47,7 @@ export function createBestBuyAdapter(id: string, label: string): Adapter | null 
       })
       if (!res.ok) throw new Error(`${label}: HTTP ${res.status}`)
 
-      const data = (await res.json()) as BestBuyResponse
+      const data = await readJsonLimited<BestBuyResponse>(res, 3_000_000)
       return (data.products ?? []).map((p) => ({
         externalId: String(p.sku),
         title: p.name,

@@ -3,6 +3,8 @@ import { searchAllAdapters } from '@/lib/fanout'
 import { generateJson } from '@/lib/llm/client'
 import { planMission, type MissionPlan, type MissionQuery } from '@/lib/llm/mission-planner'
 import { formatPrice } from '@/lib/format'
+import { CATALOG_DUMP_TYPES } from '@/lib/relevance'
+import { hasTokenCoverage } from '@/lib/text'
 
 const NON_SHOP_TYPES = new Set(['reddit', 'rss', 'mock'])
 
@@ -64,6 +66,18 @@ async function searchOneQuery(
     for (const item of r.kept.slice(0, 4)) {
       const l = item.listing
       if (!l.priceMinor || l.priceMinor <= 0) continue
+      if (
+        CATALOG_DUMP_TYPES.has(r.adapter.type) &&
+        (item.score < 0.35 || !hasTokenCoverage(mq.q, [l.title, l.detailsText]))
+      ) {
+        continue
+      }
+      if (
+        (mq.maxPriceMinor != null || mq.minPriceMinor != null) &&
+        l.currency !== 'USD'
+      ) {
+        continue
+      }
       if (mq.maxPriceMinor != null && l.priceMinor > mq.maxPriceMinor) continue
       if (mq.minPriceMinor != null && l.priceMinor < mq.minPriceMinor) continue
       out.push({
@@ -89,13 +103,12 @@ async function searchOneQuery(
 }
 
 const RANK_SYSTEM = `You rank shopping shortlist candidates for a Scour mission.
-Return ONLY JSON: { "picks": [ { "id": string, "why": string, "rank": number } ] }
+Return ONLY JSON: { "picks": [ { "id": string, "rank": number } ] }
 
 Rules:
 - Pick at most 5 ids from the candidates list. rank is 1 = best.
 - Prefer items that match criteria, fit budget, and offer clear value.
 - Diversify: don't pick 5 near-duplicates of the same product unless nothing else fits.
-- why: one short plain sentence (no markdown).
 - Only use ids from the provided list. Never invent products.`
 
 async function rankPicks(
@@ -164,10 +177,7 @@ async function rankPicks(
         url: c.url,
         imageUrl: c.imageUrl,
         query: c.query,
-        why:
-          typeof row.why === 'string' && row.why.trim()
-            ? row.why.trim().slice(0, 200)
-            : `Matches “${c.query}”.`,
+        why: `Strong match for “${c.query}” at ${formatPrice(c.priceMinor, c.currency)}.`,
         rank: typeof row.rank === 'number' ? row.rank : picks.length + 1,
       })
       if (picks.length >= 5) break

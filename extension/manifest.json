@@ -3,7 +3,7 @@
   "name": "Scour — price overlay",
   "version": "0.1.0",
   "description": "On any product page, show cheaper matches across stores via your Scour instance.",
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage"],
   "host_permissions": [
     "http://localhost:3000/*",
     "http://127.0.0.1:3000/*",

@@ -14,7 +14,7 @@ const SUGGESTIONS = [
 // which injects the current query's compared products as context. Lives only on
 // the search page (rendered when there's a query) so it always has something to
 // talk about.
-export function Copilot({ query }: { query: string }) {
+export function Copilot({ query, sourceIds }: { query: string; sourceIds: string[] }) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState('')
@@ -38,7 +38,7 @@ export function Copilot({ query }: { query: string }) {
       const res = await fetch('/api/copilot', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query, messages: next }),
+        body: JSON.stringify({ query, sourceIds, messages: next }),
       })
       if (!res.body) throw new Error('no stream')
 

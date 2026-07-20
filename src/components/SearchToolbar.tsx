@@ -15,6 +15,8 @@ const TYPE_DOT: Record<string, string> = {
   ebay: 'bg-blue-400',
   etsy: 'bg-pink-400',
   bestbuy: 'bg-yellow-400',
+  amazon: 'bg-cyan-400',
+  'generic-html': 'bg-teal-400',
   mock: 'bg-fg-subtle',
 }
 
@@ -54,10 +56,10 @@ export function SearchToolbar({
     const nextSet = new Set(current)
     if (isOn) nextSet.delete(id)
     else nextSet.add(id)
-    if (nextSet.size === all.length || nextSet.size === 0) {
+    if (nextSet.size === all.length) {
       update({ sources: null })
     } else {
-      update({ sources: [...nextSet].join(',') })
+      update({ sources: nextSet.size > 0 ? [...nextSet].join(',') : 'none' })
     }
   }
 

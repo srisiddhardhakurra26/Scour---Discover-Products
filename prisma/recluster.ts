@@ -2,6 +2,7 @@
 // titles, then re-cluster from scratch using the same logic as src/lib/cluster.ts.
 // Run with: npm run db:recluster
 
+import 'dotenv/config'
 import path from 'node:path'
 import { PrismaClient } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
@@ -61,7 +62,8 @@ function priceFits(price: number, clusterPrices: number[]): boolean {
 
 async function main() {
   const dbPath = path.resolve(process.cwd(), 'prisma', 'dev.db')
-  const adapter = new PrismaBetterSqlite3({ url: `file:${dbPath}` })
+  const url = process.env.DATABASE_URL || `file:${dbPath}`
+  const adapter = new PrismaBetterSqlite3({ url })
   const prisma = new PrismaClient({ adapter })
 
   console.log('Loading embedding model (cached on disk after first run)…')

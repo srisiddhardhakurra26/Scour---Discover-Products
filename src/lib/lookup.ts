@@ -75,7 +75,8 @@ export async function lookupProduct(input: {
   baseUrl?: string
 }): Promise<LookupResult> {
   const query = cleanTitle(input.title)
-  const currency = input.currency?.trim() || 'USD'
+  const requestedCurrency = input.currency?.trim().toUpperCase() ?? ''
+  const currency = /^[A-Z]{3}$/.test(requestedCurrency) ? requestedCurrency : 'USD'
   const pageHost =
     input.pageHost?.replace(/^www\./, '') || hostOf(input.pageUrl) || undefined
   const currentPrice =
@@ -148,13 +149,19 @@ export async function lookupProduct(input: {
 
   // Cheapest among clearly-related alternatives only — a weaker match may
   // still be listed, but it never drives the savings headline.
-  const priced = alternatives
+  const sameCurrency = alternatives.filter((offer) => offer.currency === currency)
+  const priced = (sameCurrency.length > 0 ? sameCurrency : alternatives)
     .filter((o) => o.score >= CHEAPEST_MIN_SCORE)
     .sort((a, b) => a.priceMinor - b.priceMinor)
   const cheapest = priced[0] ?? null
 
   let savingsMinor: number | null = null
-  if (currentPrice != null && cheapest && cheapest.priceMinor < currentPrice) {
+  if (
+    currentPrice != null &&
+    cheapest &&
+    cheapest.currency === currency &&
+    cheapest.priceMinor < currentPrice
+  ) {
     savingsMinor = currentPrice - cheapest.priceMinor
   }
 

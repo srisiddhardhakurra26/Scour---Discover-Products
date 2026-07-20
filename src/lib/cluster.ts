@@ -60,13 +60,14 @@ function priceFits(newPriceMinor: number, clusterPrices: number[]): boolean {
   return ratio >= PRICE_RATIO_LOW && ratio <= PRICE_RATIO_HIGH
 }
 
-async function loadCandidateProducts(): Promise<ProductWithListings[]> {
+async function loadCandidateProducts(excludeListingId: string): Promise<ProductWithListings[]> {
   return prisma.product.findMany({
     select: {
       id: true,
       canonicalTitle: true,
       canonicalImage: true,
       listings: {
+        where: { id: { not: excludeListingId } },
         select: { url: true, priceMinor: true, textEmbedding: true },
       },
     },
@@ -74,15 +75,39 @@ async function loadCandidateProducts(): Promise<ProductWithListings[]> {
 }
 
 /** Try to find an existing Product by matching ASIN in URLs. Fast path. */
-async function findProductByASIN(asin: string): Promise<string | null> {
+async function findProductByASIN(asin: string, excludeListingId: string): Promise<string | null> {
   const match = await prisma.listing.findFirst({
     where: {
+      id: { not: excludeListingId },
       productId: { not: null },
       OR: [{ url: { contains: `/dp/${asin}` } }, { url: { contains: asin } }],
     },
     select: { productId: true },
   })
   return match?.productId ?? null
+}
+
+async function refreshPreviousProduct(
+  previousProductId: string | null,
+  nextProductId: string,
+): Promise<void> {
+  if (!previousProductId || previousProductId === nextProductId) return
+  const remaining = await prisma.listing.count({ where: { productId: previousProductId } })
+  if (remaining === 0) {
+    await prisma.product.delete({ where: { id: previousProductId } }).catch(() => {})
+  } else {
+    await updateProductAggregates(previousProductId)
+  }
+}
+
+async function moveListing(
+  listingId: string,
+  nextProductId: string,
+  previousProductId: string | null,
+): Promise<void> {
+  await prisma.listing.update({ where: { id: listingId }, data: { productId: nextProductId } })
+  await updateProductAggregates(nextProductId)
+  await refreshPreviousProduct(previousProductId, nextProductId)
 }
 
 /** Attach a listing to its best-matching existing Product, or create a new one. */
@@ -92,17 +117,23 @@ export async function clusterListing(
 ): Promise<{ productId: string; created: boolean; similarity: number; reason: string }> {
   const listing = await prisma.listing.findUnique({
     where: { id: listingId },
-    select: { title: true, url: true, imageUrl: true, priceMinor: true, imageHash: true },
+    select: {
+      title: true,
+      url: true,
+      imageUrl: true,
+      priceMinor: true,
+      imageHash: true,
+      productId: true,
+    },
   })
   if (!listing) throw new Error(`listing not found: ${listingId}`)
 
   // --- Pass 1: ASIN exact match (cheap and authoritative when present)
   const asin = extractASIN(listing.url)
   if (asin) {
-    const productId = await findProductByASIN(asin)
+    const productId = await findProductByASIN(asin, listingId)
     if (productId) {
-      await prisma.listing.update({ where: { id: listingId }, data: { productId } })
-      await updateProductAggregates(productId)
+      await moveListing(listingId, productId, listing.productId)
       return { productId, created: false, similarity: 1, reason: `asin:${asin}` }
     }
   }
@@ -117,17 +148,16 @@ export async function clusterListing(
     })
     const hashMatch = hashed.find((r) => hashesMatch(listing.imageHash!, r.imageHash!))
     if (hashMatch?.productId && priceFits(listing.priceMinor, [hashMatch.priceMinor])) {
-      await prisma.listing.update({
-        where: { id: listingId },
-        data: { productId: hashMatch.productId },
-      })
-      await updateProductAggregates(hashMatch.productId)
+      await moveListing(listingId, hashMatch.productId, listing.productId)
       return { productId: hashMatch.productId, created: false, similarity: 1, reason: 'image-hash' }
     }
   }
 
   // --- Pass 2: cosine similarity over normalized-title embeddings + price sanity
-  const candidates = await loadCandidateProducts()
+  // Exclude the listing being re-clustered. Otherwise its own freshly-written
+  // embedding is a perfect 1.0 match and a changed product can never leave its
+  // old cluster.
+  const candidates = await loadCandidateProducts(listingId)
   let best: { product: ProductWithListings; similarity: number } | null = null
   for (const p of candidates) {
     if (p.listings.length === 0) continue
@@ -172,11 +202,7 @@ export async function clusterListing(
   if (best && attach) {
     const prices = best.product.listings.map((l) => l.priceMinor)
     if (priceFits(listing.priceMinor, prices)) {
-      await prisma.listing.update({
-        where: { id: listingId },
-        data: { productId: best.product.id },
-      })
-      await updateProductAggregates(best.product.id)
+      await moveListing(listingId, best.product.id, listing.productId)
       return {
         productId: best.product.id,
         created: false,
@@ -199,10 +225,7 @@ export async function clusterListing(
       retailerCount: 1,
     },
   })
-  await prisma.listing.update({
-    where: { id: listingId },
-    data: { productId: product.id },
-  })
+  await moveListing(listingId, product.id, listing.productId)
   return {
     productId: product.id,
     created: true,

@@ -4,17 +4,25 @@ import { formatPrice } from '@/lib/format'
 import { CardRail } from './CardRail'
 
 export async function FeaturedClusters() {
-  const products = await prisma.product.findMany({
-    where: { retailerCount: { gte: 2 } },
+  const candidates = await prisma.product.findMany({
+    where: { listings: { some: { retailer: { is: { enabled: true } } } } },
     include: {
       listings: {
+        where: { retailer: { is: { enabled: true } } },
         orderBy: { priceMinor: 'asc' },
-        include: { retailer: { select: { label: true, type: true } } },
+        include: { retailer: { select: { id: true, label: true, type: true } } },
       },
     },
     orderBy: [{ retailerCount: 'desc' }, { listingCount: 'desc' }],
-    take: 10,
+    take: 200,
   })
+  const products = candidates
+    .filter(
+      (product) =>
+        !/^sponsored(?: ad)?\s*[-:]/i.test(product.canonicalTitle) &&
+        new Set(product.listings.map((listing) => listing.retailer.id)).size >= 2,
+    )
+    .slice(0, 10)
 
   if (products.length === 0) return null
 
@@ -36,7 +44,8 @@ export async function FeaturedClusters() {
 
       <CardRail itemMinWidth={240} scrollByCount={3}>
         {products.map((p) => {
-          const cheapest = p.listings[0]
+          const cheapest = p.listings.find((listing) => listing.priceMinor > 0)
+          const displayImage = p.listings.find((listing) => listing.imageUrl)?.imageUrl
           // Dedupe retailers for the chip preview
           const retailers = new Set<string>()
           for (const l of p.listings) retailers.add(l.retailer.label ?? l.retailer.type)
@@ -50,10 +59,10 @@ export async function FeaturedClusters() {
               className="group flex w-[240px] shrink-0 snap-start flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition-all hover:-translate-y-0.5 hover:border-accent/50"
             >
               <div className="relative aspect-square w-full overflow-hidden bg-bg-elevated">
-                {p.canonicalImage ? (
+                {displayImage ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={p.canonicalImage}
+                    src={displayImage}
                     alt={p.canonicalTitle}
                     loading="lazy"
                     className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
@@ -64,10 +73,12 @@ export async function FeaturedClusters() {
                   </div>
                 )}
                 <div className="absolute right-2 top-2 rounded-md bg-bg/85 px-2 py-1 font-mono text-[11px] font-bold text-accent-strong backdrop-blur-md">
-                  from {cheapest ? formatPrice(cheapest.priceMinor, cheapest.currency) : '—'}
+                  {cheapest
+                    ? `from ${formatPrice(cheapest.priceMinor, cheapest.currency)}`
+                    : 'price unavailable'}
                 </div>
                 <div className="absolute left-2 top-2 rounded-md bg-bg/85 px-1.5 py-0.5 font-mono text-[10px] font-bold text-fg backdrop-blur-md">
-                  {p.retailerCount} stores
+                  {retailers.size} stores
                 </div>
               </div>
               <div className="flex flex-col gap-1.5 p-3">

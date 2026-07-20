@@ -95,13 +95,38 @@ export async function AllResultsView({
   }
 
   if (sort === 'price-asc') {
+    const currencyOrder = new Map(
+      [...new Set(all.map((item) => item.listing.currency))].map((currency, index) => [
+        currency,
+        index,
+      ]),
+    )
     all.sort((a, b) => {
+      const currencyDiff =
+        (currencyOrder.get(a.listing.currency) ?? 0) -
+        (currencyOrder.get(b.listing.currency) ?? 0)
+      if (currencyDiff !== 0) return currencyDiff
       const ap = a.listing.priceMinor || Number.MAX_SAFE_INTEGER
       const bp = b.listing.priceMinor || Number.MAX_SAFE_INTEGER
       return ap - bp
     })
   } else if (sort === 'price-desc') {
-    all.sort((a, b) => (b.listing.priceMinor || 0) - (a.listing.priceMinor || 0))
+    const currencyOrder = new Map(
+      [...new Set(all.map((item) => item.listing.currency))].map((currency, index) => [
+        currency,
+        index,
+      ]),
+    )
+    all.sort((a, b) => {
+      const currencyDiff =
+        (currencyOrder.get(a.listing.currency) ?? 0) -
+        (currencyOrder.get(b.listing.currency) ?? 0)
+      if (currencyDiff !== 0) return currencyDiff
+      if (a.listing.priceMinor <= 0 && b.listing.priceMinor <= 0) return 0
+      if (a.listing.priceMinor <= 0) return 1
+      if (b.listing.priceMinor <= 0) return -1
+      return b.listing.priceMinor - a.listing.priceMinor
+    })
   } else {
     all.sort((a, b) => b.score - a.score)
   }
@@ -144,11 +169,18 @@ function BestDealCallout({ listings }: { listings: TaggedListing[] }) {
   // the callout entirely rather than crowning a marginal result.
   if (topRelevant[0].score < 0.4) return null
 
-  const cheapest = [...topRelevant].sort(
+  const byCurrency = new Map<string, TaggedListing[]>()
+  for (const listing of topRelevant) {
+    const group = byCurrency.get(listing.listing.currency) ?? []
+    group.push(listing)
+    byCurrency.set(listing.listing.currency, group)
+  }
+  const comparable = [...byCurrency.values()].sort((a, b) => b.length - a.length)[0]
+  const cheapest = [...comparable].sort(
     (a, b) => a.listing.priceMinor - b.listing.priceMinor,
   )[0]
 
-  const others = topRelevant.filter((l) => l !== cheapest).slice(0, 5)
+  const others = comparable.filter((l) => l !== cheapest).slice(0, 5)
   const median =
     others.length > 0
       ? others.map((l) => l.listing.priceMinor).sort((a, b) => a - b)[Math.floor(others.length / 2)]

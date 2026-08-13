@@ -1,7 +1,15 @@
 import { streamText, type ChatMessage } from '@/lib/llm/client'
 import { buildCopilotContext, COPILOT_SYSTEM } from '@/lib/llm/copilot'
+import { chooseCopilotTool } from '@/lib/llm/copilot-planner'
+import {
+  fallbackToolAnswer,
+  openScourMcpSession,
+  toolStatus,
+  type CopilotMcpOutput,
+} from '@/lib/copilot-mcp'
+import type { CopilotStreamEvent } from '@/lib/copilot-protocol'
 
-// Needs Prisma (Node-only) for grounding context.
+// Needs Prisma, native SQLite, and the MCP server internals.
 export const runtime = 'nodejs'
 
 type IncomingMessage = { role?: unknown; content?: unknown }
@@ -25,37 +33,111 @@ export async function POST(req: Request) {
     : undefined
   const incoming = Array.isArray(body.messages) ? (body.messages as IncomingMessage[]) : []
 
-  // Keep only well-formed user/assistant turns, cap history + per-message length.
   const history: ChatMessage[] = incoming
     .filter(
-      (m): m is { role: 'user' | 'assistant'; content: string } =>
-        (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
+      (message): message is { role: 'user' | 'assistant'; content: string } =>
+        (message.role === 'user' || message.role === 'assistant') &&
+        typeof message.content === 'string',
     )
     .slice(-10)
-    .map((m) => ({ role: m.role, content: m.content.slice(0, 2000) }))
+    .map((message) => ({ role: message.role, content: message.content.slice(0, 2000) }))
 
   if (history.length === 0) return new Response('No messages.', { status: 400 })
 
-  const context = await buildCopilotContext(query, sourceIds).catch(() => '')
-  const messages: ChatMessage[] = [
-    { role: 'system', content: `${COPILOT_SYSTEM}\n\n${context}` },
-    ...history,
-  ]
-
   const encoder = new TextEncoder()
+  const encode = (event: CopilotStreamEvent) =>
+    encoder.encode(`${JSON.stringify(event)}\n`)
+  const origin = new URL(req.url).origin
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let toolOutput: CopilotMcpOutput | null = null
+      let toolFailed = false
+      const contextPromise = buildCopilotContext(query, sourceIds).catch(() => '')
+
       try {
-        for await (const delta of streamText(messages, { tier: 'fast', maxTokens: 700 })) {
-          controller.enqueue(encoder.encode(delta))
+        controller.enqueue(encode({ type: 'status', message: 'Deciding what to do…' }))
+        const session = await openScourMcpSession(origin)
+        try {
+          const tools = await session.listTools()
+          const call = await chooseCopilotTool(history, query, tools)
+          if (call) {
+            controller.enqueue(encode({ type: 'status', message: toolStatus(call.name) }))
+            toolOutput = await session.callTool(call)
+            controller.enqueue(encode({ type: 'tool', tool: toolOutput.presentation }))
+          }
+        } finally {
+          await session.close()
         }
       } catch (err) {
-        console.error('[copilot] stream error:', err)
+        toolFailed = true
+        console.error('[copilot] MCP tool call failed:', err)
         controller.enqueue(
-          encoder.encode(
-            "\n\n_Copilot is unavailable right now — the AI providers didn't respond. Search still works._",
-          ),
+          encode({
+            type: 'error',
+            message: 'I couldn’t complete that store search. You can retry or refine the request.',
+          }),
         )
+      }
+
+      // Tool-backed searches remain useful without an LLM key. Avoid a known
+      // provider failure and summarize the structured MCP result locally.
+      if (!process.env.GROQ_API_KEY && !process.env.GEMINI_API_KEY) {
+        if (toolOutput) {
+          controller.enqueue(
+            encode({ type: 'text', delta: fallbackToolAnswer(toolOutput.presentation) }),
+          )
+        } else if (!toolFailed) {
+          controller.enqueue(
+            encode({
+              type: 'error',
+              message:
+                'Add a Groq or Gemini key to enable open-ended conversation. Direct requests like “find headphones under $100” work without one.',
+            }),
+          )
+        }
+        controller.close()
+        return
+      }
+
+      const context = await contextPromise
+      const toolContext = toolOutput
+        ? `\n\nMCP tool result (authoritative live data):\n${toolOutput.text.slice(0, 24_000)}`
+        : ''
+      const messages: ChatMessage[] = [
+        { role: 'system', content: `${COPILOT_SYSTEM}\n\n${context}${toolContext}` },
+        ...history,
+      ]
+
+      let emittedText = false
+      try {
+        controller.enqueue(
+          encode({
+            type: 'status',
+            message: toolOutput ? 'Reviewing the results…' : 'Writing a response…',
+          }),
+        )
+        for await (const delta of streamText(messages, { tier: 'fast', maxTokens: 700 })) {
+          emittedText = true
+          controller.enqueue(encode({ type: 'text', delta }))
+        }
+      } catch (err) {
+        console.error('[copilot] response stream failed:', err)
+        if (!emittedText) {
+          if (toolOutput) {
+            controller.enqueue(
+              encode({ type: 'text', delta: fallbackToolAnswer(toolOutput.presentation) }),
+            )
+          } else if (!toolFailed) {
+            controller.enqueue(
+              encode({
+                type: 'error',
+                message:
+                  'Copilot needs a Groq or Gemini key for conversational answers. Direct product-search requests still work.',
+              }),
+            )
+          }
+        }
       } finally {
         controller.close()
       }
@@ -64,8 +146,9 @@ export async function POST(req: Request) {
 
   return new Response(stream, {
     headers: {
-      'content-type': 'text/plain; charset=utf-8',
+      'content-type': 'application/x-ndjson; charset=utf-8',
       'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
     },
   })
 }

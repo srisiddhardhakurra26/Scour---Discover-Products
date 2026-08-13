@@ -2,7 +2,7 @@
 
 Discover products across major shopping platforms and compare them side by side — no unified checkout, always a deep link to the real retailer.
 
-**Status:** working app (~5k LOC), well past the original design phase. Search, source management, wishlist, AI shopping copilot, **shopping missions**, and a **browser extension overlay** all function today.
+**Status:** working app (~5k LOC), well past the original design phase. Adaptive search, source management, wishlist, AI shopping copilot, and a **browser extension overlay** all function today.
 
 ## What it does
 
@@ -10,8 +10,8 @@ Discover products across major shopping platforms and compare them side by side 
 - The same product listed on different retailers is clustered into one card with prices side by side, using local text embeddings (+ an exact-photo signal) rather than trusting brand/model text alone.
 - Add a storefront domain as a new source; an LLM agent figures out how to scrape it (or repairs it later if it breaks).
 - Save products to a wishlist and set a price-drop alert.
-- Ask the built-in AI copilot shopping questions — it's grounded in your current search/wishlist context and streams its answer.
-- **Shopping missions** (`/missions`) — describe a goal (“gift for dad under $50 who likes coffee”); the agent plans multi-query searches, fans them out, and returns a ranked shortlist.
+- Ask the built-in shopping agent to search products, find cheaper offers, run missions, list sources, or discuss the current results. It discovers and calls the same MCP tools exposed to Claude and ChatGPT, then streams a grounded answer with clickable product cards.
+- **Adaptive search** (`/search`) — a single-product query returns normal results; a goal such as “furnish a home office under $500” becomes a multi-category plan with complete, budget-aware packages.
 - **Browser extension** (`extension/`) — on Amazon/eBay/Etsy/Best Buy product pages, a floating panel shows cheaper matches via `POST /api/lookup`.
 - **MCP server** (`/api/mcp`) — add Scour as a connector in Claude, ChatGPT, or any MCP client; exposes search, cheaper-lookup, missions, and source listing as tools.
 
@@ -20,14 +20,14 @@ Discover products across major shopping platforms and compare them side by side 
 | Route        | Purpose                                                        |
 |--------------|------------------------------------------------------------------|
 | `/`          | Home / query entry                                               |
-| `/search`    | Fan-out search results, streamed via React Suspense               |
-| `/missions`  | LLM shopping missions → multi-query shortlist                     |
+| `/search`    | Adaptive product results or multi-item plans, streamed via Suspense |
+| `/missions`  | Legacy direct entry for shopping goals                              |
 | `/sources`   | Add, enable/disable, and monitor retailer sources (health history) |
 | `/wishlist`  | Saved products with optional price-drop alerts                    |
 
 | API                    | Purpose                                              |
 |------------------------|------------------------------------------------------|
-| `POST /api/copilot`    | Streaming chat (grounded shopping assistant)         |
+| `POST /api/copilot`    | Streaming MCP-powered shopping agent                  |
 | `POST /api/lookup`     | Extension product lookup → alternatives + savings    |
 | `POST /api/mission`    | Run a shopping mission → plan + ranked picks         |
 | `/api/mcp`             | MCP server (Streamable HTTP) → Scour tools for AI clients |
@@ -43,7 +43,8 @@ npm run db:seed        # seeds default retailer sources
 npm run dev
 ```
 
-Open http://localhost:3000 and run a search. Try `/missions` for agent-planned multi-store goals.
+Open http://localhost:3000 and search for either a product or a complete goal. For example, `mechanical keyboard under $120` shows normal products, while `furnish a home office under $500` shows a plan and complete packages.
+The **Ask Scour** button is available on every page; ask it to find a product in plain English.
 
 ### Browser extension
 

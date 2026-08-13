@@ -1,7 +1,7 @@
 export function SearchBar({
   defaultValue = '',
   size = 'md',
-  placeholder = 'Search across every store…',
+  placeholder = 'Search products or describe a complete goal…',
 }: {
   defaultValue?: string
   size?: 'sm' | 'md' | 'lg'

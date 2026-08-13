@@ -47,7 +47,11 @@ async function tryGroq(opts: JsonOptions, signal: AbortSignal): Promise<string> 
       max_tokens: opts.maxTokens ?? 1024,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: opts.system },
+        // Groq's OpenAI-compatible API rejects json_object mode unless the
+        // messages literally mention JSON. Some callers describe an exact
+        // object shape without using that word, so make the contract explicit
+        // once here rather than relying on every agent prompt to remember it.
+        { role: 'system', content: `Respond with one valid JSON object.\n\n${opts.system}` },
         { role: 'user', content: opts.user },
       ],
     }),

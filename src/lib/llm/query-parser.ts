@@ -52,6 +52,7 @@ Examples:
 const CACHE_TTL_MS = 60 * 60 * 1000 // 1h — queries don't change meaning
 type CacheEntry = { value: ParsedQuery; expiresAt: number }
 const memo = new Map<string, CacheEntry>()
+const pending = new Map<string, Promise<ParsedQuery>>()
 
 function normalizeKey(q: string): string {
   return q.trim().toLowerCase().replace(/\s+/g, ' ')
@@ -134,13 +135,31 @@ export function parsePriceBounds(query: string): { minPriceMinor?: number; maxPr
  * LLM failure, returns the raw query with no filters — search still works,
  * just without the agent's help.
  */
-export const parseQuery = cache(async (rawQuery: string): Promise<ParsedQuery> => {
+async function parseQueryOnce(rawQuery: string): Promise<ParsedQuery> {
   const trimmed = rawQuery.trim()
   if (!trimmed) return { refinedQuery: '' }
 
   const key = normalizeKey(trimmed)
   const hit = memo.get(key)
   if (hit && hit.expiresAt > Date.now()) return hit.value
+
+  // A fan-out asks every adapter to parse the same query at once. React.cache
+  // only guarantees render-request memoization, not route-handler/library
+  // calls, so explicitly coalesce them process-wide. One mission query should
+  // cost one LLM call, not one call per store.
+  const inFlight = pending.get(key)
+  if (inFlight) return inFlight
+
+  const work = parseUncached(trimmed, key)
+  pending.set(key, work)
+  try {
+    return await work
+  } finally {
+    if (pending.get(key) === work) pending.delete(key)
+  }
+}
+
+async function parseUncached(trimmed: string, key: string): Promise<ParsedQuery> {
 
   let parsed: ParsedQuery
   let llmOk = true
@@ -174,4 +193,6 @@ export const parseQuery = cache(async (rawQuery: string): Promise<ParsedQuery> =
   // recovers. (React.cache still dedupes within the request.)
   if (llmOk) memo.set(key, { value: parsed, expiresAt: Date.now() + CACHE_TTL_MS })
   return parsed
-})
+}
+
+export const parseQuery = cache(parseQueryOnce)

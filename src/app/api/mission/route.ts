@@ -1,6 +1,7 @@
 import { runMission } from '@/lib/mission'
 
 export const runtime = 'nodejs'
+export const maxDuration = 45
 
 const CORS = {
   'access-control-allow-origin': '*',

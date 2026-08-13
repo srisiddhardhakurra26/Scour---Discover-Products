@@ -53,6 +53,7 @@ model Listing {
   @@index([productId])
   @@index([capturedAt])
   @@index([imageHash])
+  @@index([retailerId, lastSeenAt])
 }
 
 model Product {

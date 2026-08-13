@@ -27,7 +27,7 @@ const TYPE_BADGE: Record<string, string> = {
 const TRENDING = [
   'wireless earbuds',
   'mechanical keyboard',
-  'cocoa powder',
+  'furnish a home office under $500',
   'oled tv',
   'french press',
   'running shoe',
@@ -55,8 +55,8 @@ export default async function Home() {
               <span className="text-accent-strong">Every store.</span>
             </h1>
             <p className="max-w-xl text-balance text-base text-fg-muted sm:text-lg">
-              Type what you want once — Scour fans out across Amazon, eBay, Etsy, Shopify
-              storefronts, Reddit deal communities, and more.
+              Search for one product or describe a complete setup. Scour adapts the results,
+              then fans out across every enabled store.
             </p>
           </div>
 
@@ -65,11 +65,7 @@ export default async function Home() {
           </div>
 
           <p className="text-sm text-fg-muted">
-            Or run a{' '}
-            <Link href="/missions" className="text-accent-strong underline-offset-2 hover:underline">
-              shopping mission
-            </Link>
-            {' '}— gift briefs, kits, and multi-product goals, planned by the agent.
+            Search for one product or describe a complete goal—Scour adapts automatically.
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs">

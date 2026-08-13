@@ -10,6 +10,7 @@ import {
   type RankedListing,
 } from '@/lib/relevance'
 import { parseQuery } from '@/lib/llm/query-parser'
+import type { ParsedQuery } from '@/lib/llm/query-parser'
 import { reformulateForStore } from '@/lib/llm/requery'
 import {
   adapterSearchKey,
@@ -37,10 +38,18 @@ export type AdapterSearchResult = {
   fromCache: boolean
 }
 
-// One in-flight search per adapter per request. AllResultsView, the per-source
-// AdapterSections, and ClusteredProductsSection all await the same promises,
-// so each adapter is searched — and its results persisted — exactly once per
-// request, and every section sees the same final state. This replaces the old
+type SearchOptions = {
+  persist?: boolean
+  parsedQuery?: ParsedQuery
+  allowRequery?: boolean
+}
+
+// One in-flight search per adapter/mode per request. AllResultsView, the
+// per-source AdapterSections, and ClusteredProductsSection all await the same
+// persisted promises, so each adapter is searched exactly once per request
+// and every section sees the same final state. Ephemeral consumers such as
+// missions use a separate key because they intentionally skip persistence.
+// This replaces the old
 // model where the clusters section polled the DB and raced the other sections'
 // writes, surfacing different clusters run to run for the same query.
 const inFlight = cache(() => new Map<string, Promise<AdapterSearchResult>>())
@@ -49,12 +58,22 @@ export function searchAdapter(
   adapter: Adapter,
   query: string,
   timeoutMs: number,
+  options?: SearchOptions,
 ): Promise<AdapterSearchResult> {
   const pool = inFlight()
-  const key = adapterSearchKey(adapter.id, query)
+  const persist = options?.persist !== false
+  const allowRequery = options?.allowRequery !== false
+  const key = `${adapterSearchKey(adapter.id, query)}:${persist ? 'persist' : 'ephemeral'}:${allowRequery ? 'retry' : 'once'}`
   const hit = pool.get(key)
   if (hit) return hit
-  const promise = run(adapter, query, timeoutMs)
+  const promise = run(
+    adapter,
+    query,
+    timeoutMs,
+    persist,
+    options?.parsedQuery,
+    allowRequery,
+  )
   pool.set(key, promise)
   return promise
 }
@@ -64,17 +83,21 @@ export function searchAllAdapters(
   adapters: Adapter[],
   query: string,
   timeoutMs: number,
+  options?: SearchOptions,
 ): Promise<AdapterSearchResult[]> {
-  return Promise.all(adapters.map((a) => searchAdapter(a, query, timeoutMs)))
+  return Promise.all(adapters.map((a) => searchAdapter(a, query, timeoutMs, options)))
 }
 
 async function run(
   adapter: Adapter,
   query: string,
   timeoutMs: number,
+  persist: boolean,
+  parsedQuery: ParsedQuery | undefined,
+  allowRequery: boolean,
 ): Promise<AdapterSearchResult> {
   const started = performance.now()
-  const parsed = await parseQuery(query)
+  const parsed = parsedQuery ?? (await parseQuery(query))
   try {
     const searchQuery = parsed.refinedQuery || query
     // Hard ceiling on top of the AbortSignal: some adapters don't honor abort
@@ -99,6 +122,7 @@ async function run(
     // we simply keep the empty first pass.
     if (
       ranked.kept.length === 0 &&
+      allowRequery &&
       adapter.type !== 'mock' &&
       adapter.type !== 'shopify'
     ) {
@@ -136,14 +160,16 @@ async function run(
     // Persist before resolving (not via after()) so ClusteredProductsSection,
     // which awaits this same promise, sees the writes and the clusters built
     // from them.
-    try {
-      await persistListings(
-        adapter.id,
-        ranked.kept.map((r) => r.listing),
-        ranked.kept.map((r) => r.embedding),
-      )
-    } catch (err) {
-      console.error(`[persist] ${adapter.label}:`, err)
+    if (persist) {
+      try {
+        await persistListings(
+          adapter.id,
+          ranked.kept.map((r) => r.listing),
+          ranked.kept.map((r) => r.embedding),
+        )
+      } catch (err) {
+        console.error(`[persist] ${adapter.label}:`, err)
+      }
     }
     return {
       adapter,

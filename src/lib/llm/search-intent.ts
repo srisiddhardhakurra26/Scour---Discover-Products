@@ -14,7 +14,7 @@ const SYSTEM = `Classify a shopping query for Scour. Return ONLY JSON:
 
 Definitions:
 - product: the user wants one product category, including variants, styles, brands, features, or price constraints.
-- mission: satisfying the goal requires exploring multiple distinct product categories, assembling a setup/kit/outfit/room, or finding diverse gift ideas.
+- mission: satisfying the goal requires exploring multiple distinct products/categories, comparing named alternatives, assembling a setup/kit/outfit/room, or finding diverse gift ideas.
 
 Critical rules:
 - Uncertainty about style does not make a query a mission. "Leather boots over $150, not sure what style" is product.
@@ -23,6 +23,7 @@ Critical rules:
 - "Build a coffee setup under $300" is mission.
 - "Gift for a cyclist under $75" is mission because several product categories may fit.
 - A terse list of unrelated products is a mission even without commas. "monitor chair backpack" means three required products.
+- Named competing products are also a mission. "PS5 Xbox" means compare separate console searches; it is not one product phrase.
 - A normal compound product remains a product. "laptop backpack", "chair mat", and "monitor stand" each name one product category.
 - When one product search can directly satisfy the request, choose product.`
 

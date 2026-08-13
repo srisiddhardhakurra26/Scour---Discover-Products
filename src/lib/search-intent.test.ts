@@ -8,6 +8,8 @@ test('intent fallback recognizes multi-category missions', () => {
   assert.equal(fallbackSearchIntent('Gift for a cyclist under $75').intent, 'mission')
   assert.equal(fallbackSearchIntent('monitor chair backpack').intent, 'mission')
   assert.equal(fallbackSearchIntent('monitor, chair and backpack').intent, 'mission')
+  assert.equal(fallbackSearchIntent('ps5 xbox').intent, 'mission')
+  assert.equal(fallbackSearchIntent('PS5 vs Xbox').intent, 'mission')
 })
 
 test('intent fallback keeps single product requests in normal search', () => {
@@ -22,4 +24,6 @@ test('intent fallback keeps single product requests in normal search', () => {
   assert.equal(fallbackSearchIntent('laptop backpack').intent, 'product')
   assert.equal(fallbackSearchIntent('chair mat').intent, 'product')
   assert.equal(fallbackSearchIntent('monitor stand').intent, 'product')
+  assert.equal(fallbackSearchIntent('ps5 controller').intent, 'product')
+  assert.equal(fallbackSearchIntent('xbox controller').intent, 'product')
 })

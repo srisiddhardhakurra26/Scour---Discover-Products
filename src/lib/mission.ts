@@ -7,6 +7,28 @@ import { hasTokenCoverage } from '@/lib/text'
 
 const NON_SHOP_TYPES = new Set(['reddit', 'rss', 'mock'])
 
+export function matchesConsoleHardware(query: string, title: string): boolean {
+  const q = query.toLowerCase()
+  if (!q.includes('console')) return true
+  const normalized = title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  if (/playstation 5/.test(q)) {
+    return (
+      /\b(?:playstation\s*5|ps5)\b/.test(normalized) &&
+      (/^(?:sony\s+)?playstation\s*5\b/.test(normalized) ||
+        /\b(?:console|digital edition|disc edition|slim|pro|\d+\s*(?:gb|tb)|bundle)\b/.test(normalized))
+    )
+  }
+  if (/xbox/.test(q)) {
+    return (
+      /\bxbox\b/.test(normalized) &&
+      (/^(?:microsoft\s+)?xbox\s+(?:series\s+[xs]|one\s+[xs]?)\b/.test(normalized) ||
+        /\bconsole\b/.test(normalized)) &&
+      !/\b(?:game|standard edition|campaign|controller|headset|skin|case|cover|stand|charging|gift card)\b/.test(normalized)
+    )
+  }
+  return true
+}
+
 export type MissionCandidate = {
   id: string
   title: string
@@ -90,9 +112,11 @@ async function searchOneQuery(
   const out: MissionCandidate[] = []
   for (const r of results) {
     if (r.failed) continue
-    for (const item of r.kept.slice(0, 4)) {
+    let acceptedForStore = 0
+    for (const item of r.kept) {
       const l = item.listing
       if (!l.priceMinor || l.priceMinor <= 0) continue
+      if (!matchesConsoleHardware(mq.q, l.title)) continue
       if (
         CATALOG_DUMP_TYPES.has(r.adapter.type) &&
         (item.score < 0.35 || !hasTokenCoverage(mq.q, [l.title, l.detailsText]))
@@ -119,6 +143,8 @@ async function searchOneQuery(
         query: mq.q,
         score: item.score,
       })
+      acceptedForStore++
+      if (acceptedForStore >= 4) break
     }
   }
   // Best relevance then cheapest per query

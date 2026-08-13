@@ -68,3 +68,12 @@ test('explicit product lists become required bundle slots', () => {
     ['monitor', 'chair', 'backpack'],
   )
 })
+
+test('competing named products become comparison alternatives', () => {
+  const plan = fallbackMissionPlan('ps5 xbox')
+  assert.equal(plan.composition, 'alternatives')
+  assert.deepEqual(
+    plan.queries.map((query) => query.q),
+    ['PlayStation 5 console', 'Xbox Series X console'],
+  )
+})

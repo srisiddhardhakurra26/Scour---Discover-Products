@@ -1,6 +1,6 @@
 import { generateJson } from './client'
 import { parsePriceBounds } from './query-parser'
-import { explicitProductList } from '@/lib/product-list'
+import { explicitProductList, productListComposition } from '@/lib/product-list'
 
 export type MissionQuery = {
   q: string
@@ -76,13 +76,17 @@ export function fallbackMissionPlan(mission: string): MissionPlan {
   const text = mission.trim().slice(0, 500)
   const normalized = text.toLowerCase()
   const listedProducts = explicitProductList(text)
-  const composition = listedProducts.length >= 2 ? 'bundle' : inferComposition(text)
+  const composition = listedProducts.length >= 2
+    ? productListComposition(listedProducts)
+    : inferComposition(text)
   let fallbackQueries: FallbackQuery[]
 
   if (listedProducts.length >= 2) {
     fallbackQueries = listedProducts.slice(0, 5).map((product) => [
       product,
-      'explicitly requested as a separate product',
+      composition === 'alternatives'
+        ? 'explicitly named comparison option'
+        : 'explicitly requested as a separate product',
     ])
   } else if (/\b(home office|office setup|workspace)\b/.test(normalized)) {
     fallbackQueries = [

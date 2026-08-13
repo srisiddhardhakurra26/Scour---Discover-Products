@@ -1,4 +1,18 @@
 const COMPOUND_CATEGORIES: Array<[phrase: string, label: string]> = [
+  ['playstation 5 console', 'PlayStation 5 console'],
+  ['playstation 5 controller', 'PlayStation 5 controller'],
+  ['playstation 5', 'PlayStation 5 console'],
+  ['ps5 console', 'PlayStation 5 console'],
+  ['ps5 controller', 'PlayStation 5 controller'],
+  ['ps5 game', 'PlayStation 5 game'],
+  ['xbox series x console', 'Xbox Series X console'],
+  ['xbox series s console', 'Xbox Series S console'],
+  ['xbox series x', 'Xbox Series X console'],
+  ['xbox series s', 'Xbox Series S console'],
+  ['xbox controller', 'Xbox controller'],
+  ['xbox game', 'Xbox game'],
+  ['nintendo switch console', 'Nintendo Switch console'],
+  ['nintendo switch', 'Nintendo Switch console'],
   ['computer monitor', 'monitor'],
   ['monitor arm', 'monitor arm'],
   ['monitor stand', 'monitor stand'],
@@ -53,6 +67,7 @@ const CATEGORY_ALIASES: Record<string, string> = {
   cameras: 'camera', camera: 'camera',
   chairs: 'chair', chair: 'chair',
   consoles: 'console', console: 'console',
+  controllers: 'controller', controller: 'controller',
   couches: 'couch', couch: 'couch', sofas: 'sofa', sofa: 'sofa',
   desks: 'desk', desk: 'desk',
   dresses: 'dress', dress: 'dress',
@@ -72,6 +87,7 @@ const CATEGORY_ALIASES: Record<string, string> = {
   phones: 'phone', phone: 'phone',
   printers: 'printer', printer: 'printer',
   projectors: 'projector', projector: 'projector',
+  ps5: 'PlayStation 5 console',
   refrigerators: 'refrigerator', refrigerator: 'refrigerator', fridges: 'refrigerator', fridge: 'refrigerator',
   rugs: 'rug', rug: 'rug',
   shirts: 'shirt', shirt: 'shirt',
@@ -85,13 +101,14 @@ const CATEGORY_ALIASES: Record<string, string> = {
   treadmills: 'treadmill', treadmill: 'treadmill',
   tripods: 'tripod', tripod: 'tripod',
   watches: 'watch', watch: 'watch',
+  xbox: 'Xbox Series X console',
 }
 
 const IGNORED_WORDS = new Set([
   'a', 'an', 'and', 'best', 'black', 'blue', 'budget', 'buy', 'cheap', 'compact',
   'expensive', 'for', 'good', 'green', 'i', 'large', 'leather', 'looking', 'me',
   'my', 'need', 'new', 'of', 'or', 'portable', 'premium', 'quiet', 'red', 'small',
-  'the', 'to', 'used', 'want', 'white', 'wireless', 'with',
+  'the', 'to', 'used', 'versus', 'vs', 'want', 'white', 'wireless', 'with',
 ])
 
 function cleanTokens(query: string): string[] {
@@ -143,10 +160,26 @@ export function explicitProductList(query: string): string[] {
   const unknown = tokens.filter(
     (token, index) => !covered.has(index) && !IGNORED_WORDS.has(token) && !/^\d+$/.test(token),
   )
-  const hasListSeparator = /[,/&+] |[,/&+]|\b(?:and|plus)\b/i.test(query)
+  const hasListSeparator = /[,/&+] |[,/&+]|\b(?:and|plus|versus|vs)\b/i.test(query)
 
   if (hasListSeparator && unknown.length <= 3) return unique
   if (unique.length >= 3 && unknown.length <= 3) return unique
   if (unique.length === 2 && unknown.length === 0) return unique
   return []
+}
+
+const CONSOLE_ALTERNATIVES = new Set([
+  'PlayStation 5 console',
+  'Xbox Series X console',
+  'Xbox Series S console',
+  'Nintendo Switch console',
+])
+
+/** Comparable products should be shown as choices, not a package to buy together. */
+export function productListComposition(
+  products: string[],
+): 'bundle' | 'alternatives' {
+  return products.length >= 2 && products.every((product) => CONSOLE_ALTERNATIVES.has(product))
+    ? 'alternatives'
+    : 'bundle'
 }

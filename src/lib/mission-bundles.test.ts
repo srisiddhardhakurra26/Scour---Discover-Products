@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildMissionBundles, type MissionCandidate } from './mission'
+import {
+  buildMissionBundles,
+  matchesConsoleHardware,
+  type MissionCandidate,
+} from './mission'
 import type { MissionPlan } from './llm/mission-planner'
 
 const plan: MissionPlan = {
@@ -55,4 +59,23 @@ test('mission bundles refuse incomplete slot coverage', () => {
     [candidate('lamp-a', 'task lamp', 5000, 0.78)],
   ])
   assert.deepEqual(bundles, [])
+})
+
+test('console mission slots reject games and accept console hardware', () => {
+  assert.equal(
+    matchesConsoleHardware('PlayStation 5 console', 'Elden Ring Nightreign (PS5)'),
+    false,
+  )
+  assert.equal(
+    matchesConsoleHardware('PlayStation 5 console', 'PlayStation 5 Digital Edition (Slim)'),
+    true,
+  )
+  assert.equal(
+    matchesConsoleHardware('Xbox Series X console', 'Halo: Campaign Evolved Standard Edition'),
+    false,
+  )
+  assert.equal(
+    matchesConsoleHardware('Xbox Series X console', 'Xbox Series X All-Digital Console 1TB'),
+    true,
+  )
 })

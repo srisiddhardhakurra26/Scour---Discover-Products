@@ -1,6 +1,6 @@
 import { getAdapters, ADAPTER_TIMEOUT_MS } from '@/lib/adapters/registry'
-import { searchAllAdapters } from '@/lib/fanout'
 import { formatPrice } from '@/lib/format'
+import { searchProducts } from '@/lib/search-engine'
 
 /** Sources that are chatter/deals, not product storefronts. */
 const NON_SHOP_TYPES = new Set(['reddit', 'rss', 'mock'])
@@ -101,14 +101,18 @@ export async function lookupProduct(input: {
   }
 
   const adapters = (await getAdapters()).filter((a) => !NON_SHOP_TYPES.has(a.type))
-  const results = await searchAllAdapters(adapters, query, ADAPTER_TIMEOUT_MS)
+  const result = await searchProducts({
+    query,
+    adapters,
+    timeoutMs: ADAPTER_TIMEOUT_MS,
+    maxResults: 16,
+  })
 
   const offers: LookupOffer[] = []
   const hitStores = new Set<string>()
-  for (const r of results) {
-    if (r.failed || r.kept.length === 0) continue
-    for (const item of r.kept.slice(0, 5)) {
-      if (item.score < ALTERNATIVE_MIN_SCORE) continue
+  for (const product of result.products) {
+    for (const item of product.offers.slice(0, 5)) {
+      if (product.score.baseRelevance < ALTERNATIVE_MIN_SCORE) continue
       const listing = item.listing
       if (!listing.priceMinor || listing.priceMinor <= 0) continue
       // Skip offers on the same host the user is already viewing
@@ -116,16 +120,16 @@ export async function lookupProduct(input: {
       if (pageHost && offerHost && (offerHost === pageHost || offerHost.endsWith(`.${pageHost}`))) {
         continue
       }
-      hitStores.add(r.adapter.label)
+      hitStores.add(item.adapter.label)
       offers.push({
         title: listing.title,
         priceMinor: listing.priceMinor,
         currency: listing.currency || currency,
-        store: r.adapter.label,
-        storeType: r.adapter.type,
+        store: item.adapter.label,
+        storeType: item.adapter.type,
         url: listing.url,
         imageUrl: listing.imageUrl,
-        score: item.score,
+        score: product.score.baseRelevance,
       })
     }
   }

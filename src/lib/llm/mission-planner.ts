@@ -82,8 +82,13 @@ export function fallbackMissionPlan(mission: string): MissionPlan {
   let fallbackQueries: FallbackQuery[]
 
   if (listedProducts.length >= 2) {
+    const workspaceList = listedProducts.includes('monitor') && listedProducts.includes('chair')
     fallbackQueries = listedProducts.slice(0, 5).map((product) => [
-      product,
+      workspaceList && product === 'chair'
+        ? 'ergonomic office chair'
+        : workspaceList && product === 'backpack'
+          ? 'laptop backpack'
+          : product,
       composition === 'alternatives'
         ? 'explicitly named comparison option'
         : 'explicitly requested as a separate product',
@@ -131,11 +136,17 @@ export function fallbackMissionPlan(mission: string): MissionPlan {
       ['bedside lamp', 'task and ambient lighting'],
     ]
   } else if (/\b(outfit|wardrobe)\b/.test(normalized)) {
-    fallbackQueries = [
-      ['outfit top', 'the upper-body layer'],
-      ['outfit pants', 'the coordinating lower-body piece'],
-      ['outfit shoes', 'footwear to complete the outfit'],
-    ]
+    fallbackQueries = /\bwedding\b/.test(normalized)
+      ? [
+          ['linen shirt', 'a summer-appropriate wedding top'],
+          ['dress pants', 'a coordinating formal bottom'],
+          ['dress shoes', 'wedding-appropriate footwear'],
+        ]
+      : [
+          ['outfit top', 'the upper-body layer'],
+          ['outfit pants', 'the coordinating lower-body piece'],
+          ['outfit shoes', 'footwear to complete the outfit'],
+        ]
   } else if (/\b(cyclist|cycling|bicycle|bike rider)\b/.test(normalized)) {
     fallbackQueries = [
       ['rechargeable bike light', 'a practical visibility upgrade'],

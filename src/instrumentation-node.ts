@@ -12,6 +12,10 @@ export function warmup() {
     .then((m) => m.embedText('warmup'))
     .catch((err) => console.warn('[instrumentation] embedder warmup failed:', err))
 
+  import('./lib/local-reranker')
+    .then((module) => module.warmLocalReranker())
+    .catch((err) => console.warn('[instrumentation] local reranker warmup failed:', err))
+
   // Prewarm Shopify catalogs so the first search of a session doesn't race a
   // cold catalog fetch against the adapter timeout — the cold-start cause of
   // "store missing from the first search".

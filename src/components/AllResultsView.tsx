@@ -1,251 +1,268 @@
-import type { Adapter } from '@/lib/adapters/types'
-import { CATALOG_DUMP_TYPES, type RankedListing } from '@/lib/relevance'
-import { searchAllAdapters } from '@/lib/fanout'
-import { parseQuery } from '@/lib/llm/query-parser'
-import { hasAttributeEvidence, rerankCandidates } from '@/lib/llm/rerank'
+import type { Adapter, NormalizedListing } from '@/lib/adapters/types'
 import { formatPrice } from '@/lib/format'
+import { searchProducts, type SearchProduct } from '@/lib/search-engine'
+import { SearchFeedback } from './SearchFeedback'
+import type { SortKey, ViewMode } from './SearchToolbar'
 
-// LLM rerank score below which a candidate is judged off-intent and dropped.
-const RERANK_KEEP = 0.45
-// When the judge drops every candidate, show embedding matches at or above
-// this score instead of an empty page (~0.35 = same product category).
-const EMPTY_JUDGE_FALLBACK_FLOOR = 0.35
-import { ListingCard } from './ListingCard'
-import type { SortKey } from './SearchToolbar'
+const TYPE_DOT: Record<string, string> = {
+  shopify: 'bg-emerald-400',
+  woocommerce: 'bg-violet-400',
+  reddit: 'bg-orange-400',
+  rss: 'bg-amber-400',
+  ebay: 'bg-blue-400',
+  etsy: 'bg-pink-400',
+  bestbuy: 'bg-yellow-400',
+  amazon: 'bg-cyan-400',
+  'generic-html': 'bg-teal-400',
+  mock: 'bg-fg-subtle',
+}
 
-type TaggedListing = RankedListing & { adapter: Adapter }
+function landedPrice(listing: NormalizedListing): number {
+  return listing.priceMinor > 0
+    ? listing.priceMinor + Math.max(0, listing.shippingMinor ?? 0)
+    : Number.MAX_SAFE_INTEGER
+}
+
+function bestOffer(product: SearchProduct) {
+  return [...product.offers].sort(
+    (left, right) => landedPrice(left.listing) - landedPrice(right.listing),
+  )[0] ?? product.candidate
+}
+
+function sortedProducts(products: SearchProduct[], sort: SortKey): SearchProduct[] {
+  if (sort === 'relevance') return products
+  return [...products].sort((left, right) => {
+    const a = bestOffer(left).listing
+    const b = bestOffer(right).listing
+    const currency = a.currency.localeCompare(b.currency)
+    if (currency !== 0) return currency
+    return sort === 'price-asc'
+      ? landedPrice(a) - landedPrice(b)
+      : landedPrice(b) - landedPrice(a)
+  })
+}
 
 export async function AllResultsView({
   query,
   sort,
   adapters,
   timeoutMs,
+  view = 'all',
 }: {
   query: string
   sort: SortKey
   adapters: Adapter[]
   timeoutMs: number
+  view?: ViewMode
 }) {
-  const parsed = await parseQuery(query)
+  const result = await searchProducts({ query, adapters, timeoutMs })
+  const products = sortedProducts(result.products, sort)
 
-  // Shared fan-out: search + rank + persist happen once per adapter per
-  // request (see fanout.ts); other sections await the same promises.
-  const results = await searchAllAdapters(adapters, query, timeoutMs)
-
-  const pool: TaggedListing[] = results.flatMap(({ adapter, kept }) =>
-    kept.map((k) => ({ ...k, adapter })),
-  )
-
-  // Precision pass: an LLM reranks the candidate pool by true intent — a
-  // Chelsea boot matches "shoes"; a sneaker does NOT match "leather boots".
-  // Embeddings gave recall (and, with catalog-dump Shopify sources, a long
-  // low-relevance tail — a sneaker brand's whole catalog for a "boots" query).
-  // Cap to the strongest candidates, judge exactly that displayed set, and cut
-  // the tail. Time-boxed inside rerankCandidates; on failure we fall back to
-  // embedding order (still capped).
-  // Cap the set the judge scores in one shot. A reasoning model rates ~40 short
-  // titles far more reliably than 60 — fewer omissions, sharper per-item calls.
-  const DISPLAY_CAP = 40
-  let all = [...pool].sort((a, b) => b.score - a.score).slice(0, DISPLAY_CAP)
-  if (all.length > 1) {
-    const scores = await rerankCandidates(
-      query,
-      parsed,
-      all.map((t) => ({
-        id: `${t.adapter.id}-${t.listing.externalId}`,
-        title: t.listing.title,
-        brand: t.listing.sellerName,
-        priceMinor: t.listing.priceMinor,
-        currency: t.listing.currency,
-        details: t.listing.detailsText,
-      })),
-    )
-    if (scores) {
-      const judged = all.flatMap((t) => {
-        const s = scores.get(`${t.adapter.id}-${t.listing.externalId}`)
-        if (s === undefined) return [t] // judge didn't score it → keep, don't guess
-        if (s < RERANK_KEEP) return [] // judged off-intent → drop
-        return [{ ...t, score: s }] // judged relevant → adopt the sharper score
-      })
-      // Judge rejected EVERYTHING. Respect rejections backed by evidence
-      // (details said wool/canvas, shopper wants leather — hiding those is
-      // CORRECT), and resurrect only evidence-blind candidates (title-only
-      // sources like generic-html) in the confident embedding band. Without
-      // the evidence check this showed Allbirds wool for "leather shoes".
-      all =
-        judged.length > 0
-          ? judged
-          : all.filter(
-              (t) =>
-                !hasAttributeEvidence(t.listing.detailsText) &&
-                t.score >= EMPTY_JUDGE_FALLBACK_FLOOR,
-            )
-    } else {
-      // Judge unavailable (rate limit/outage). Marketplace items already
-      // matched the query server-side — keep them in embedding order (the
-      // tuned LLM-down behavior). Catalog-dump items did NOT (the store
-      // ignored the query), so raw embedding order shows the catalog's tail;
-      // keep only the confident same-category band for those.
-      all = all.filter(
-        (t) =>
-          !CATALOG_DUMP_TYPES.has(t.adapter.type) ||
-          t.score >= EMPTY_JUDGE_FALLBACK_FLOOR,
-      )
-    }
-  }
-
-  if (sort === 'price-asc') {
-    const currencyOrder = new Map(
-      [...new Set(all.map((item) => item.listing.currency))].map((currency, index) => [
-        currency,
-        index,
-      ]),
-    )
-    all.sort((a, b) => {
-      const currencyDiff =
-        (currencyOrder.get(a.listing.currency) ?? 0) -
-        (currencyOrder.get(b.listing.currency) ?? 0)
-      if (currencyDiff !== 0) return currencyDiff
-      const ap = a.listing.priceMinor || Number.MAX_SAFE_INTEGER
-      const bp = b.listing.priceMinor || Number.MAX_SAFE_INTEGER
-      return ap - bp
-    })
-  } else if (sort === 'price-desc') {
-    const currencyOrder = new Map(
-      [...new Set(all.map((item) => item.listing.currency))].map((currency, index) => [
-        currency,
-        index,
-      ]),
-    )
-    all.sort((a, b) => {
-      const currencyDiff =
-        (currencyOrder.get(a.listing.currency) ?? 0) -
-        (currencyOrder.get(b.listing.currency) ?? 0)
-      if (currencyDiff !== 0) return currencyDiff
-      if (a.listing.priceMinor <= 0 && b.listing.priceMinor <= 0) return 0
-      if (a.listing.priceMinor <= 0) return 1
-      if (b.listing.priceMinor <= 0) return -1
-      return b.listing.priceMinor - a.listing.priceMinor
-    })
-  } else {
-    all.sort((a, b) => b.score - a.score)
-  }
-
-  if (all.length === 0) {
+  if (products.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border bg-bg-card p-16 text-center">
-        <p className="text-sm text-fg-muted">No matches across the selected sources.</p>
-        <p className="font-mono text-[11px] text-fg-subtle">try different keywords or enable more sources</p>
+        <p className="text-sm text-fg-muted">No products passed the relevance and constraint checks.</p>
+        <p className="font-mono text-[11px] text-fg-subtle">try a broader product name or remove a required filter</p>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col gap-8">
-      <BestDealCallout listings={all} />
-
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-        {all.map(({ listing, adapter }) => (
-          <ListingCard
-            key={`${adapter.id}-${listing.externalId}`}
-            listing={listing}
-            retailerLabel={adapter.label}
-            retailerType={adapter.type}
-            showRetailerBadge
-          />
-        ))}
-      </div>
+    <div className="flex flex-col gap-6">
+      <IntentSummary result={result} />
+      <VerifiedOfferCallout products={products} />
+      {view === 'by-source' ? (
+        <ProductsBySource products={products} query={query} searchRunId={result.searchRunId} />
+      ) : (
+        <ProductGrid products={products} query={query} searchRunId={result.searchRunId} />
+      )}
     </div>
   )
 }
 
-function BestDealCallout({ listings }: { listings: TaggedListing[] }) {
-  // Pick cheapest among the top-relevant pool, not absolute cheapest of
-  // everything. Otherwise a low-scoring $3 accessory wins "lowest price".
-  const priced = listings.filter((l) => l.listing.priceMinor > 0)
-  if (priced.length === 0) return null
-  const topRelevant = [...priced].sort((a, b) => b.score - a.score).slice(0, 10)
-  // Require the top item to actually be a confident match — otherwise hide
-  // the callout entirely rather than crowning a marginal result.
-  if (topRelevant[0].score < 0.4) return null
+function ProductGrid({ products, query, searchRunId }: { products: SearchProduct[]; query: string; searchRunId: string | null }) {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {products.map((product) => (
+        <ProductCard key={product.entityKey} product={product} query={query} searchRunId={searchRunId} />
+      ))}
+    </div>
+  )
+}
 
-  const byCurrency = new Map<string, TaggedListing[]>()
-  for (const listing of topRelevant) {
-    const group = byCurrency.get(listing.listing.currency) ?? []
-    group.push(listing)
-    byCurrency.set(listing.listing.currency, group)
+function ProductsBySource({ products, query, searchRunId }: { products: SearchProduct[]; query: string; searchRunId: string | null }) {
+  const groups = new Map<string, SearchProduct[]>()
+  for (const product of products) {
+    const label = bestOffer(product).adapter.label
+    groups.set(label, [...(groups.get(label) ?? []), product])
   }
-  const comparable = [...byCurrency.values()].sort((a, b) => b.length - a.length)[0]
-  const cheapest = [...comparable].sort(
-    (a, b) => a.listing.priceMinor - b.listing.priceMinor,
-  )[0]
+  return (
+    <div className="flex flex-col gap-10">
+      {[...groups.entries()].map(([label, sourceProducts]) => (
+        <section key={label} className="flex flex-col gap-3">
+          <div className="flex items-center justify-between border-b border-border pb-2">
+            <h2 className="text-sm font-semibold text-fg">{label}</h2>
+            <span className="font-mono text-[10px] text-fg-subtle">{sourceProducts.length} distinct products</span>
+          </div>
+          <ProductGrid products={sourceProducts} query={query} searchRunId={searchRunId} />
+        </section>
+      ))}
+    </div>
+  )
+}
 
-  const others = comparable.filter((l) => l !== cheapest).slice(0, 5)
-  const median =
-    others.length > 0
-      ? others.map((l) => l.listing.priceMinor).sort((a, b) => a - b)[Math.floor(others.length / 2)]
-      : 0
-  const savings = median > 0 ? Math.round(((median - cheapest.listing.priceMinor) / median) * 100) : 0
+function IntentSummary({ result }: { result: Awaited<ReturnType<typeof searchProducts>> }) {
+  const { spec, diagnostics } = result
+  const chips = [
+    spec.productType,
+    spec.brand,
+    spec.model,
+    ...spec.must,
+    ...spec.mustNot.map((value) => `not ${value}`),
+    spec.minPriceMinor !== undefined
+      ? `at least ${formatPrice(spec.minPriceMinor, 'USD')}`
+      : undefined,
+    spec.maxPriceMinor !== undefined
+      ? `up to ${formatPrice(spec.maxPriceMinor, 'USD')}`
+      : undefined,
+  ].filter((value): value is string => Boolean(value))
 
+  return (
+    <section className="rounded-xl border border-border bg-bg-card px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold text-fg">Interpreted as</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {chips.length > 0 ? chips.map((chip) => (
+              <span key={chip} className="rounded-full border border-border-strong bg-bg-elevated px-2 py-1 text-[10px] text-fg-muted">
+                {chip}
+              </span>
+            )) : (
+              <span className="text-[11px] text-fg-muted">a product matching the full phrase</span>
+            )}
+          </div>
+        </div>
+        <div className="text-right font-mono text-[10px] leading-5 text-fg-subtle">
+          <div>{result.products.length} distinct products · {result.storesHit} stores</div>
+          <div>{diagnostics.duplicateOffersCollapsed} duplicate offers grouped · {result.elapsedMs}ms</div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function VerifiedOfferCallout({ products }: { products: SearchProduct[] }) {
+  const comparable = products
+    .filter((product) => product.offers.length >= 2)
+    .map((product) => {
+      const offers = [...product.offers]
+        .filter((offer) => offer.listing.priceMinor > 0)
+        .sort((left, right) => landedPrice(left.listing) - landedPrice(right.listing))
+      const sameCurrency = offers.filter(
+        (offer) => offer.listing.currency === offers[0]?.listing.currency,
+      )
+      return { product, offers: sameCurrency }
+    })
+    .filter((entry) => entry.offers.length >= 2)
+    .sort((left, right) => right.offers.length - left.offers.length)[0]
+  if (!comparable) return null
+
+  const cheapest = comparable.offers[0]
+  const next = comparable.offers[1]
+  const savings = Math.max(0, landedPrice(next.listing) - landedPrice(cheapest.listing))
   return (
     <a
       href={cheapest.listing.url}
       target="_blank"
       rel="noopener noreferrer"
-      className="group block overflow-hidden rounded-2xl border border-accent/40 bg-gradient-to-br from-accent/10 via-accent/5 to-transparent transition-all hover:border-accent hover:from-accent/15"
+      className="group flex items-center gap-4 rounded-2xl border border-accent/40 bg-gradient-to-br from-accent/10 via-accent/5 to-transparent p-4 transition-colors hover:border-accent"
     >
-      <div className="flex items-center gap-4 p-4">
-        <div className="hidden h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-bg-elevated sm:block">
-          {cheapest.listing.imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={cheapest.listing.imageUrl}
-              alt={cheapest.listing.title}
-              className="h-full w-full object-cover"
-            />
-          ) : null}
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex flex-wrap items-center gap-2">
+          <span className="rounded-md bg-accent/20 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-accent-strong">
+            Verified same-product deal
+          </span>
+          {savings > 0 && <span className="font-mono text-[10px] text-success">save {formatPrice(savings, cheapest.listing.currency)}</span>}
         </div>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <div className="flex items-center gap-2">
-            <span className="rounded-md bg-accent/20 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-accent-strong">
-              ⚡ Lowest Price
-            </span>
-            {savings > 0 && (
-              <span className="font-mono text-[10px] text-success">
-                {savings}% below median
-              </span>
-            )}
-          </div>
-          <div className="truncate text-sm font-semibold text-fg">
-            {cheapest.listing.title}
-          </div>
-          <div className="text-[11px] text-fg-muted">
-            from <span className="font-medium text-fg">{cheapest.adapter.label}</span>
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1">
-          <div className="font-mono text-3xl font-bold leading-none text-accent-strong">
-            {formatPrice(cheapest.listing.priceMinor, cheapest.listing.currency)}
-          </div>
-          <div className="font-mono text-[10px] uppercase tracking-wider text-fg-subtle group-hover:text-accent">
-            open →
-          </div>
-        </div>
+        <p className="truncate text-sm font-semibold text-fg">{comparable.product.candidate.title}</p>
+        <p className="mt-1 text-[11px] text-fg-muted">Compared across {comparable.offers.length} matching store offers</p>
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="font-mono text-2xl font-bold text-accent-strong">{formatPrice(landedPrice(cheapest.listing), cheapest.listing.currency)}</p>
+        <p className="text-[10px] text-fg-subtle">at {cheapest.adapter.label} →</p>
       </div>
     </a>
   )
 }
 
+function ProductCard({
+  product,
+  query,
+  searchRunId,
+}: {
+  product: SearchProduct
+  query: string
+  searchRunId: string | null
+}) {
+  const offer = bestOffer(product)
+  const listing = offer.listing
+  const dot = TYPE_DOT[offer.adapter.type] ?? TYPE_DOT.mock
+  const explanations = [
+    offer.role === 'exact' ? 'exact match' : 'close substitute',
+    ...offer.roleDecision.reasons.slice(0, 2),
+    ...product.score.newlyCoveredAspects
+      .filter((aspect) => aspect.startsWith('facet:'))
+      .slice(0, 2)
+      .map((aspect) => aspect.slice('facet:'.length)),
+  ]
+  const uniqueExplanations = [...new Set(explanations)]
+
+  return (
+    <article className="group flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition-all hover:-translate-y-0.5 hover:border-border-strong hover:bg-bg-hover">
+      <a href={listing.url} target="_blank" rel="noopener noreferrer" className="relative aspect-[4/3] overflow-hidden bg-bg-elevated">
+        {listing.imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={listing.imageUrl} alt={listing.title} loading="lazy" className="h-full w-full object-contain transition-transform duration-500 group-hover:scale-[1.03]" />
+        ) : (
+          <div className="flex h-full items-center justify-center text-[10px] uppercase tracking-wider text-fg-subtle">no image</div>
+        )}
+        <span className="absolute right-2 top-2 rounded-md bg-bg/90 px-2 py-1 font-mono text-[12px] font-bold text-accent-strong backdrop-blur-md">
+          {listing.priceMinor > 0 ? formatPrice(landedPrice(listing), listing.currency) : 'Price unavailable'}
+        </span>
+        <span className="absolute left-2 top-2 flex items-center gap-1.5 rounded-md bg-bg/90 px-2 py-1 text-[10px] text-fg backdrop-blur-md">
+          <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+          {offer.adapter.label}
+        </span>
+      </a>
+      <div className="flex flex-1 flex-col gap-3 p-3">
+        <a href={listing.url} target="_blank" rel="noopener noreferrer" className="line-clamp-2 min-h-[2.5em] text-[13px] font-medium leading-tight text-fg hover:text-accent-strong">
+          {product.candidate.title}
+        </a>
+        <div className="flex flex-wrap gap-1">
+          {uniqueExplanations.slice(0, 3).map((reason) => (
+            <span key={reason} className="rounded bg-bg-elevated px-1.5 py-1 text-[9px] text-fg-muted">{reason}</span>
+          ))}
+        </div>
+        {product.offers.length > 1 && (
+          <div className="border-t border-border pt-2 text-[10px] text-fg-muted">
+            {product.offers.length} verified offers from {product.sourceKeys.length} stores
+          </div>
+        )}
+        <div className="mt-auto border-t border-border pt-2">
+          <SearchFeedback query={query} searchRunId={searchRunId} resultKey={product.entityKey} />
+        </div>
+      </div>
+    </article>
+  )
+}
+
 export function AllResultsLoading() {
   return (
-    <div className="flex flex-col gap-8">
-      <div className="h-24 animate-pulse rounded-2xl border border-accent/20 bg-accent/5" />
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-        {Array.from({ length: 10 }).map((_, i) => (
-          <div
-            key={i}
-            className="aspect-[3/4] animate-pulse rounded-xl border border-border bg-bg-card"
-          />
+    <div className="flex flex-col gap-6">
+      <div className="h-20 animate-pulse rounded-xl border border-border bg-bg-card" />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {Array.from({ length: 8 }).map((_, index) => (
+          <div key={index} className="aspect-[3/4] animate-pulse rounded-xl border border-border bg-bg-card" />
         ))}
       </div>
     </div>

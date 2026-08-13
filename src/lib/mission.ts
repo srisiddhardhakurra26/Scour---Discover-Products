@@ -1,11 +1,10 @@
 import { getAdapters, ADAPTER_TIMEOUT_MS } from '@/lib/adapters/registry'
-import { searchAllAdapters } from '@/lib/fanout'
 import { planMission, type MissionPlan, type MissionQuery } from '@/lib/llm/mission-planner'
 import { formatPrice } from '@/lib/format'
-import { CATALOG_DUMP_TYPES } from '@/lib/relevance'
-import { hasTokenCoverage } from '@/lib/text'
+import { searchProducts } from '@/lib/search-engine'
 
 const NON_SHOP_TYPES = new Set(['reddit', 'rss', 'mock'])
+const MISSION_QUERY_CONCURRENCY = 2
 
 export function matchesConsoleHardware(query: string, title: string): boolean {
   const q = query.toLowerCase()
@@ -96,63 +95,59 @@ async function searchOneQuery(
   adapters: Awaited<ReturnType<typeof getAdapters>>,
 ): Promise<MissionCandidate[]> {
   const q = buildSearchQ(mq)
-  // Mission candidates are consumed directly from adapter results. Persisting
-  // and clustering every candidate would add dozens of sequential LLM judge
-  // calls before the user sees the shortlist, and can turn a brief request
-  // into a multi-minute one under provider rate limits.
-  const results = await searchAllAdapters(adapters, q, ADAPTER_TIMEOUT_MS, {
+  // Every mission slot uses the same hybrid retrieval, role gate, canonical
+  // dedupe, and diversity ranker as normal search. Persistence and per-slot
+  // telemetry stay off because the mission records one user-level operation.
+  const result = await searchProducts({
+    query: q,
+    adapters,
+    timeoutMs: ADAPTER_TIMEOUT_MS,
     persist: false,
-    allowRequery: false,
-    parsedQuery: {
-      refinedQuery: mq.q,
-      maxPriceMinor: mq.maxPriceMinor,
-      minPriceMinor: mq.minPriceMinor,
-    },
+    telemetry: false,
+    maxResults: 12,
   })
   const out: MissionCandidate[] = []
-  for (const r of results) {
-    if (r.failed) continue
-    let acceptedForStore = 0
-    for (const item of r.kept) {
-      const l = item.listing
-      if (!l.priceMinor || l.priceMinor <= 0) continue
-      if (!matchesConsoleHardware(mq.q, l.title)) continue
-      if (
-        CATALOG_DUMP_TYPES.has(r.adapter.type) &&
-        (item.score < 0.35 || !hasTokenCoverage(mq.q, [l.title, l.detailsText]))
-      ) {
-        continue
-      }
-      if (
-        (mq.maxPriceMinor != null || mq.minPriceMinor != null) &&
-        l.currency !== 'USD'
-      ) {
-        continue
-      }
-      if (mq.maxPriceMinor != null && l.priceMinor > mq.maxPriceMinor) continue
-      if (mq.minPriceMinor != null && l.priceMinor < mq.minPriceMinor) continue
-      out.push({
-        id: `${r.adapter.id}:${l.externalId}`,
-        title: l.title,
-        priceMinor: l.priceMinor,
-        currency: l.currency || 'USD',
-        store: r.adapter.label,
-        storeType: r.adapter.type,
-        url: l.url,
-        imageUrl: l.imageUrl,
-        query: mq.q,
-        score: item.score,
-      })
-      acceptedForStore++
-      if (acceptedForStore >= 4) break
+  for (const product of result.products) {
+    const item = product.candidate
+    const listing = item.listing
+    if (!listing.priceMinor || listing.priceMinor <= 0) continue
+    if ((mq.maxPriceMinor != null || mq.minPriceMinor != null) && listing.currency !== 'USD') continue
+    out.push({
+      id: item.id,
+      title: listing.title,
+      priceMinor: listing.priceMinor,
+      currency: listing.currency || 'USD',
+      store: item.adapter.label,
+      storeType: item.adapter.type,
+      url: listing.url,
+      imageUrl: listing.imageUrl,
+      query: mq.q,
+      score: product.score.baseRelevance,
+    })
+  }
+  return out.slice(0, 8)
+}
+
+async function searchMissionQueries(
+  queries: MissionQuery[],
+  adapters: Awaited<ReturnType<typeof getAdapters>>,
+): Promise<MissionCandidate[][]> {
+  const results: MissionCandidate[][] = Array.from({ length: queries.length }, () => [])
+  let nextIndex = 0
+  const worker = async () => {
+    while (nextIndex < queries.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await searchOneQuery(queries[index], adapters)
     }
   }
-  // Best relevance then cheapest per query
-  out.sort((a, b) => {
-    if (Math.abs(b.score - a.score) > 0.04) return b.score - a.score
-    return a.priceMinor - b.priceMinor
-  })
-  return out.slice(0, 8)
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MISSION_QUERY_CONCURRENCY, queries.length) },
+      () => worker(),
+    ),
+  )
+  return results
 }
 
 function titleKey(title: string): string {
@@ -331,7 +326,11 @@ export async function runMission(
   }
 
   const adapters = (await getAdapters()).filter((a) => !NON_SHOP_TYPES.has(a.type))
-  const rawPerQuery = await Promise.all(plan.queries.map((mq) => searchOneQuery(mq, adapters)))
+  // A mission can contain five slots; running every slot's full adapter
+  // fan-out simultaneously overloads bot-sensitive sources and causes the
+  // final categories to disappear. Keep two slot searches in flight while
+  // retaining parallelism inside each adapter fan-out.
+  const rawPerQuery = await searchMissionQueries(plan.queries, adapters)
   const globallySeen = new Set<string>()
   const perQuery = rawPerQuery.map((candidates) =>
     candidates.filter((candidate) => {

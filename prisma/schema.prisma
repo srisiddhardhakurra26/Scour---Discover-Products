@@ -103,3 +103,42 @@ model SavedProduct {
   notes           String?
   createdAt       DateTime @default(now())
 }
+
+/// One privacy-minimal, query-level snapshot of the search pipeline. This is
+/// the foundation for regression analysis: no cookies, account IDs, or raw
+/// clickstream are stored.
+model SearchRun {
+  id                String           @id @default(cuid())
+  queryHash         String
+  intent            String
+  specJson          String
+  rankerVersion     String
+  candidateCount    Int
+  resultCount       Int
+  sourceCount       Int
+  failedSourceCount Int
+  latencyMs         Int
+  diagnosticsJson   String?
+  createdAt         DateTime         @default(now())
+  feedback          SearchFeedback[]
+
+  @@index([createdAt])
+  @@index([intent, createdAt])
+}
+
+/// Explicit relevance feedback is far more useful than treating a click as a
+/// judgment. The result key is the conservative canonical identity emitted by
+/// the ranker; reason is an optional short taxonomy value such as off_topic.
+model SearchFeedback {
+  id          String     @id @default(cuid())
+  searchRunId String?
+  queryHash   String
+  resultKey   String?
+  verdict     String
+  reason      String?
+  createdAt   DateTime   @default(now())
+  searchRun   SearchRun? @relation(fields: [searchRunId], references: [id], onDelete: SetNull)
+
+  @@index([searchRunId])
+  @@index([createdAt])
+}

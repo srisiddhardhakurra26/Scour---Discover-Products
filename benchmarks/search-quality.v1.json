@@ -1,0 +1,400 @@
+{
+  "version": 1,
+  "frozenAt": "2026-08-13",
+  "description": "Frozen launch benchmark for Scour intent, relevance, constraints, diversity, missions, and known regressions. Change labels only through a reviewed version bump.",
+  "cases": [
+    {
+      "id": "regression-ps5-xbox",
+      "query": "ps5 xbox",
+      "slices": ["regression", "comparison", "mission", "electronics"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["gaming console", "digital edition console", "disc edition console", "console 1tb", "1tb console"], "nonePhrases": ["headset", "case", "skin", "stand", "disc drive"] },
+        { "label": "exact", "anyPhrases": ["playstation 5 console", "ps5 console", "xbox series x console", "xbox series s console"], "nonePhrases": ["game", "controller", "headset", "case", "stand"] },
+        { "label": "substitute", "anyPhrases": ["playstation 5", "ps5", "xbox series x", "xbox series s"], "nonePhrases": ["game", "controller", "headset", "case", "stand"] },
+        { "label": "complement", "anyPhrases": ["controller", "headset", "game", "charging stand"] }
+      ],
+      "idealRelevance": { "exact": 6, "substitute": 4 },
+      "constraints": { "forbiddenPhrases": ["elden ring", "nightreign", "headset", "skin", "case"] },
+      "mission": {
+        "composition": "alternatives",
+        "requiredSlots": [
+          { "id": "playstation", "anyPhrases": ["playstation 5", "ps5"] },
+          { "id": "xbox", "anyPhrases": ["xbox series x", "xbox series s"] }
+        ]
+      }
+    },
+    {
+      "id": "regression-terse-product-list",
+      "query": "monitor chair backpack",
+      "slices": ["regression", "terse-list", "mission"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["monitor", "office chair", "desk chair", "backpack"], "nonePhrases": ["monitor stand", "chair mat", "stadium chair", "wheelchair backpack"] },
+        { "label": "substitute", "anyPhrases": ["display", "ergonomic chair", "rucksack"] },
+        { "label": "complement", "anyPhrases": ["monitor stand", "chair mat", "monitor arm"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "forbiddenPhrases": ["stadium chair", "bleacher", "wheelchair backpack"] },
+      "mission": {
+        "composition": "bundle",
+        "requiredSlots": [
+          { "id": "monitor", "anyPhrases": ["monitor", "display"] },
+          { "id": "chair", "anyPhrases": ["office chair", "desk chair", "ergonomic chair"] },
+          { "id": "backpack", "anyPhrases": ["backpack", "rucksack"] }
+        ]
+      }
+    },
+    {
+      "id": "regression-home-office-package",
+      "query": "Furnish a home office under $500",
+      "slices": ["regression", "mission", "bundle", "budget"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["office desk", "writing desk", "office chair", "desk chair", "task lamp", "desk lamp"] },
+        { "label": "substitute", "anyPhrases": ["computer desk", "ergonomic chair", "floor lamp"] },
+        { "label": "complement", "anyPhrases": ["desk organizer", "monitor stand", "keyboard"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "maxPriceMinor": 50000, "currency": "USD" },
+      "mission": {
+        "composition": "bundle",
+        "requiredSlots": [
+          { "id": "desk", "anyPhrases": ["office desk", "writing desk", "computer desk"] },
+          { "id": "chair", "anyPhrases": ["office chair", "desk chair", "ergonomic chair"] },
+          { "id": "lighting", "anyPhrases": ["task lamp", "desk lamp", "floor lamp"] }
+        ]
+      }
+    },
+    {
+      "id": "regression-leather-boots-minimum",
+      "query": "expensive leather boots over $150, not sure what style suits me",
+      "slices": ["regression", "single-product", "minimum-price", "fashion"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["leather", "boot"], "nonePhrases": ["faux leather", "vegan leather", "boot care"] },
+        { "label": "substitute", "anyPhrases": ["chelsea boot", "work boot", "ankle boot"], "nonePhrases": ["faux", "vegan"] },
+        { "label": "complement", "anyPhrases": ["boot care", "leather conditioner", "shoe tree"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "minPriceMinor": 15000, "currency": "USD", "requiredAllTerms": ["leather"], "forbiddenPhrases": ["faux leather", "vegan leather"] }
+    },
+    {
+      "id": "regression-blundstone-leather",
+      "query": "Blundstone leather shoes",
+      "slices": ["regression", "brand", "material", "fashion"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["blundstone", "leather"], "nonePhrases": ["vegan", "faux", "care kit", "insole"] },
+        { "label": "substitute", "allTerms": ["blundstone", "boot"], "nonePhrases": ["care kit", "insole"] },
+        { "label": "complement", "anyPhrases": ["blundstone insole", "blundstone care", "boot care"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "requiredAllTerms": ["blundstone"], "forbiddenPhrases": ["insole", "care kit"] }
+    },
+    {
+      "id": "compound-laptop-backpack",
+      "query": "laptop backpack",
+      "slices": ["intent", "compound-product", "accessory"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["laptop", "backpack"] },
+        { "label": "substitute", "anyPhrases": ["computer backpack", "notebook backpack", "laptop rucksack"] },
+        { "label": "complement", "anyPhrases": ["laptop sleeve", "backpack organizer"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "requiredAnyPhrases": ["laptop backpack", "computer backpack", "notebook backpack", "laptop rucksack"] }
+    },
+    {
+      "id": "compound-chair-mat",
+      "query": "chair mat",
+      "slices": ["intent", "compound-product", "home-office"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["chair mat", "desk mat", "floor protector"] },
+        { "label": "complement", "anyPhrases": ["office chair", "desk chair"] }
+      ],
+      "idealRelevance": { "exact": 10 },
+      "constraints": { "requiredAnyPhrases": ["chair mat", "desk mat", "floor protector"] }
+    },
+    {
+      "id": "compound-monitor-stand",
+      "query": "monitor stand",
+      "slices": ["intent", "compound-product", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["monitor stand", "monitor riser", "monitor arm"] },
+        { "label": "complement", "anyPhrases": ["monitor", "display"] }
+      ],
+      "idealRelevance": { "exact": 10 },
+      "constraints": { "requiredAnyPhrases": ["monitor stand", "monitor riser", "monitor arm"] }
+    },
+    {
+      "id": "compound-ps5-controller",
+      "query": "ps5 controller",
+      "slices": ["intent", "compound-product", "compatibility", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["ps5", "controller"], "nonePhrases": ["thumb grip", "grip cap", "precision ring", "charging station", "charging stand", "replacement joystick"] },
+        { "label": "exact", "anyPhrases": ["ps5 controller", "dualsense wireless controller", "playstation 5 controller"] },
+        { "label": "substitute", "allTerms": ["playstation", "controller"] },
+        { "label": "complement", "anyPhrases": ["charging station", "controller case", "thumb grips"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "requiredAllTerms": ["controller"], "forbiddenPhrases": ["thumb grip", "grip cap", "precision ring", "charging station", "charging stand", "replacement joystick"] }
+    },
+    {
+      "id": "constraint-quiet-keyboard",
+      "query": "quiet mechanical keyboard for office under $120",
+      "slices": ["attribute", "maximum-price", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["mechanical", "keyboard"], "anyPhrases": ["silent", "quiet"] },
+        { "label": "substitute", "allTerms": ["mechanical", "keyboard"] },
+        { "label": "complement", "anyPhrases": ["keyboard switch", "switch dampener", "wrist rest"] }
+      ],
+      "idealRelevance": { "exact": 6, "substitute": 4 },
+      "constraints": { "maxPriceMinor": 12000, "currency": "USD", "requiredAllTerms": ["keyboard"] }
+    },
+    {
+      "id": "constraint-running-shoes",
+      "query": "running shoes under $100 wide toe box",
+      "slices": ["attribute", "maximum-price", "fashion"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["wide toe box", "footshape"], "allTerms": ["running"] },
+        { "label": "substitute", "allTerms": ["wide", "running", "shoe"] },
+        { "label": "complement", "anyPhrases": ["running insole", "shoe insert"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "maxPriceMinor": 10000, "currency": "USD", "requiredAnyPhrases": ["wide toe box", "footshape", "wide running shoe"] }
+    },
+    {
+      "id": "constraint-vegan-leather-tote",
+      "query": "vegan leather tote bag under $80",
+      "slices": ["material", "maximum-price", "fashion"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["vegan", "leather", "tote"] },
+        { "label": "substitute", "anyPhrases": ["faux leather tote", "plant leather tote", "synthetic leather tote"] },
+        { "label": "complement", "anyPhrases": ["bag organizer", "tote insert"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "maxPriceMinor": 8000, "currency": "USD", "requiredAllTerms": ["leather", "tote"] }
+    },
+    {
+      "id": "exact-sony-headphones",
+      "query": "Sony WH-1000XM5",
+      "slices": ["exact-model", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["wh 1000xm5", "wh1000xm5"] },
+        { "label": "substitute", "anyPhrases": ["wh 1000xm4", "bose quietcomfort ultra"] },
+        { "label": "complement", "anyPhrases": ["replacement ear pads", "headphone case", "audio cable"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "requiredAnyPhrases": ["wh 1000xm5", "wh1000xm5"] }
+    },
+    {
+      "id": "exact-airpods-pro-generation",
+      "query": "AirPods Pro 2nd generation USB-C",
+      "slices": ["exact-model", "generation", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["airpods", "pro", "usb c"], "anyPhrases": ["2nd generation", "second generation", "gen 2"] },
+        { "label": "substitute", "allTerms": ["airpods", "pro", "2"] },
+        { "label": "complement", "anyPhrases": ["airpods case", "ear tips", "charging cable"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "requiredAllTerms": ["airpods", "pro"], "requiredAnyPhrases": ["usb c", "usb-c"] }
+    },
+    {
+      "id": "compatibility-macbook-dock",
+      "query": "USB-C dock for M2 MacBook Air dual monitors",
+      "slices": ["compatibility", "attribute", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["macbook", "docking station", "dual", "monitor"] },
+        { "label": "exact", "anyPhrases": ["usb c docking station", "macbook dock", "macbook docking station"], "allTerms": ["dual", "monitor"] },
+        { "label": "exact", "anyPhrases": ["macbook air dock", "macbook docking station", "usb c dock"], "allTerms": ["dual", "monitor"] },
+        { "label": "substitute", "anyPhrases": ["displaylink dock", "thunderbolt dock"] },
+        { "label": "complement", "anyPhrases": ["usb c hub", "display adapter", "hdmi cable"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "requiredAnyPhrases": ["dual monitor", "dual display", "displaylink"] }
+    },
+    {
+      "id": "accessory-iphone-case",
+      "query": "iPhone 15 Pro case MagSafe",
+      "slices": ["accessory", "compatibility", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["iphone", "15", "pro", "case", "magsafe"] },
+        { "label": "substitute", "allTerms": ["iphone", "15", "pro", "case"] },
+        { "label": "complement", "anyPhrases": ["screen protector", "magsafe charger", "phone grip"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "requiredAllTerms": ["iphone", "15", "pro", "case"] }
+    },
+    {
+      "id": "typo-wireless-headphones",
+      "query": "wireles noise canceling headphnes",
+      "slices": ["typo", "attribute", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["wireless", "noise cancelling", "headphones"] },
+        { "label": "exact", "allTerms": ["wireless", "noise canceling", "headphones"] },
+        { "label": "exact", "anyPhrases": ["wireless noise canceling headphones", "wireless noise cancelling headphones", "anc headphones"] },
+        { "label": "substitute", "anyPhrases": ["bluetooth headphones", "noise canceling headphones", "noise cancelling headphones"] },
+        { "label": "complement", "anyPhrases": ["headphone case", "audio cable", "ear pads"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 }
+    },
+    {
+      "id": "alias-wireless-earbuds",
+      "query": "true wireless earbuds",
+      "slices": ["alias", "broad-category", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["true wireless earbuds", "tws earbuds", "wireless earbuds"] },
+        { "label": "substitute", "anyPhrases": ["bluetooth earbuds", "airpods"] },
+        { "label": "complement", "anyPhrases": ["earbud case", "ear tips", "charging case"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 }
+    },
+    {
+      "id": "broad-office-chair",
+      "query": "ergonomic office chair",
+      "slices": ["broad-category", "diversity", "home-office"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["ergonomic office chair", "ergonomic desk chair"] },
+        { "label": "substitute", "anyPhrases": ["mesh office chair", "executive office chair", "kneeling chair"] },
+        { "label": "complement", "anyPhrases": ["chair mat", "lumbar pillow", "footrest"] }
+      ],
+      "idealRelevance": { "exact": 6, "substitute": 4 }
+    },
+    {
+      "id": "broad-coffee-grinder",
+      "query": "coffee grinder",
+      "slices": ["broad-category", "diversity", "kitchen"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["coffee grinder", "burr grinder", "espresso grinder"] },
+        { "label": "substitute", "anyPhrases": ["hand grinder", "manual grinder"] },
+        { "label": "complement", "anyPhrases": ["coffee maker", "coffee scale", "grinder cleaner"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 }
+    },
+    {
+      "id": "mission-coffee-gift",
+      "query": "gift for a coffee lover under $50",
+      "slices": ["mission", "alternatives", "gift", "budget"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["coffee grinder", "pour over coffee maker", "coffee mug", "coffee gift set", "coffee scale"] },
+        { "label": "substitute", "anyPhrases": ["french press", "coffee beans", "milk frother"] },
+        { "label": "complement", "anyPhrases": ["coffee filter", "coffee scoop"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "maxPriceMinor": 5000, "currency": "USD" },
+      "mission": {
+        "composition": "alternatives",
+        "requiredSlots": [
+          { "id": "brewing", "anyPhrases": ["pour over", "french press", "coffee maker"] },
+          { "id": "grinding", "anyPhrases": ["coffee grinder", "burr grinder", "hand grinder"] },
+          { "id": "drinkware", "anyPhrases": ["coffee mug", "travel mug", "tumbler"] }
+        ]
+      }
+    },
+    {
+      "id": "mission-kitchen-starter",
+      "query": "apartment starter kitchen kit under $250",
+      "slices": ["mission", "bundle", "budget", "home"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["cookware set", "chef knife", "cutting board", "utensil set"] },
+        { "label": "substitute", "anyPhrases": ["frying pan", "saucepan", "kitchen knife", "chopping board"] },
+        { "label": "complement", "anyPhrases": ["dish towel", "food storage"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "maxPriceMinor": 25000, "currency": "USD" },
+      "mission": {
+        "composition": "bundle",
+        "requiredSlots": [
+          { "id": "cookware", "anyPhrases": ["cookware set", "frying pan", "saucepan"] },
+          { "id": "knife", "anyPhrases": ["chef knife", "kitchen knife"] },
+          { "id": "board", "anyPhrases": ["cutting board", "chopping board"] }
+        ]
+      }
+    },
+    {
+      "id": "mission-gaming-setup",
+      "query": "build a gaming setup under $900",
+      "slices": ["mission", "bundle", "budget", "electronics"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["gaming monitor", "gaming keyboard", "gaming mouse"] },
+        { "label": "substitute", "anyPhrases": ["monitor", "mechanical keyboard", "wireless mouse"] },
+        { "label": "complement", "anyPhrases": ["mouse pad", "headset", "monitor arm"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "maxPriceMinor": 90000, "currency": "USD" },
+      "mission": {
+        "composition": "bundle",
+        "requiredSlots": [
+          { "id": "monitor", "anyPhrases": ["gaming monitor", "monitor"] },
+          { "id": "keyboard", "anyPhrases": ["gaming keyboard", "mechanical keyboard"] },
+          { "id": "mouse", "anyPhrases": ["gaming mouse", "wireless mouse"] }
+        ]
+      }
+    },
+    {
+      "id": "mission-wedding-outfit",
+      "query": "summer wedding guest outfit under $300",
+      "slices": ["mission", "bundle", "fashion", "budget"],
+      "expectedIntent": "mission",
+      "relevanceRules": [
+        { "label": "exact", "anyPhrases": ["wedding guest dress", "linen shirt", "dress pants", "dress shoes", "heels", "formal sandals"] },
+        { "label": "substitute", "anyPhrases": ["cocktail dress", "summer suit", "loafers"] },
+        { "label": "complement", "anyPhrases": ["clutch", "tie", "jewelry"] }
+      ],
+      "idealRelevance": { "exact": 8, "substitute": 2 },
+      "constraints": { "maxPriceMinor": 30000, "currency": "USD" },
+      "mission": {
+        "composition": "bundle",
+        "requiredSlots": [
+          { "id": "main", "anyPhrases": ["dress", "shirt", "suit"] },
+          { "id": "bottom", "anyPhrases": ["pants", "trousers", "skirt"] },
+          { "id": "shoes", "anyPhrases": ["dress shoes", "heels", "sandals", "loafers"] }
+        ]
+      }
+    },
+    {
+      "id": "source-resilience-running-watch",
+      "query": "GPS running watch under $250",
+      "slices": ["source-resilience", "maximum-price", "electronics"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["gps", "running", "watch"] },
+        { "label": "substitute", "anyPhrases": ["fitness watch", "multisport watch", "garmin forerunner"] },
+        { "label": "complement", "anyPhrases": ["watch band", "heart rate strap", "watch charger"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "maxPriceMinor": 25000, "currency": "USD", "requiredAnyPhrases": ["gps running watch", "gps running smartwatch", "gps sports watch", "fitness watch", "multisport watch", "garmin forerunner", "coros pace", "suunto race"] }
+    },
+    {
+      "id": "source-resilience-cast-iron",
+      "query": "12 inch cast iron skillet",
+      "slices": ["source-resilience", "attribute", "kitchen"],
+      "expectedIntent": "product",
+      "relevanceRules": [
+        { "label": "exact", "allTerms": ["12", "cast iron", "skillet"] },
+        { "label": "substitute", "allTerms": ["cast iron", "skillet"] },
+        { "label": "complement", "anyPhrases": ["skillet lid", "handle cover", "pan scraper"] }
+      ],
+      "idealRelevance": { "exact": 7, "substitute": 3 },
+      "constraints": { "requiredAllTerms": ["cast iron", "skillet"] }
+    }
+  ]
+}

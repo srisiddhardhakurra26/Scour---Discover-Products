@@ -65,7 +65,7 @@ test('explicit product lists become required bundle slots', () => {
   assert.equal(plan.composition, 'bundle')
   assert.deepEqual(
     plan.queries.map((query) => query.q),
-    ['monitor', 'chair', 'backpack'],
+    ['monitor', 'ergonomic office chair', 'laptop backpack'],
   )
 })
 
@@ -75,5 +75,14 @@ test('competing named products become comparison alternatives', () => {
   assert.deepEqual(
     plan.queries.map((query) => query.q),
     ['PlayStation 5 console', 'Xbox Series X console'],
+  )
+})
+
+test('wedding outfit fallback uses shoppable formal categories', () => {
+  const plan = fallbackMissionPlan('summer wedding guest outfit under $300')
+  assert.equal(plan.composition, 'bundle')
+  assert.deepEqual(
+    plan.queries.map((query) => query.q),
+    ['linen shirt', 'dress pants', 'dress shoes'],
   )
 })

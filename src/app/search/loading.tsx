@@ -1,6 +1,5 @@
 import { Header } from '@/components/Header'
 import { SearchBar } from '@/components/SearchBar'
-import { ClusteredProductsLoading } from '@/components/ClusteredProductsSection'
 import { AllResultsLoading } from '@/components/AllResultsView'
 
 // Shown instantly on navigation to /search — including switching views (?view=)
@@ -19,7 +18,6 @@ export default function SearchLoading() {
           <SearchBar />
         </div>
         <div className="flex flex-col gap-10">
-          <ClusteredProductsLoading />
           <AllResultsLoading />
         </div>
       </main>

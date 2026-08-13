@@ -2,11 +2,6 @@ import { Suspense } from 'react'
 import Link from 'next/link'
 import { Header } from '@/components/Header'
 import { SearchBar } from '@/components/SearchBar'
-import { AdapterSection, AdapterLoading } from '@/components/AdapterSection'
-import {
-  ClusteredProductsSection,
-  ClusteredProductsLoading,
-} from '@/components/ClusteredProductsSection'
 import { AllResultsView, AllResultsLoading } from '@/components/AllResultsView'
 import { SearchToolbar, type SortKey, type ViewMode } from '@/components/SearchToolbar'
 import {
@@ -15,6 +10,7 @@ import {
 } from '@/components/MissionSearchResults'
 import { getAdapters, ADAPTER_TIMEOUT_MS } from '@/lib/adapters/registry'
 import { classifySearchIntent, type SearchIntent } from '@/lib/llm/search-intent'
+import { buildSearchSpec } from '@/lib/search-spec'
 
 export default async function SearchPage({
   searchParams,
@@ -34,10 +30,17 @@ export default async function SearchPage({
     sp.sort === 'price-asc' || sp.sort === 'price-desc' ? sp.sort : 'relevance'
   const forcedIntent: SearchIntent | null =
     sp.mode === 'mission' ? 'mission' : sp.mode === 'product' ? 'product' : null
+  const deterministicSpec = query ? buildSearchSpec(query) : null
   const intentDecision = query
     ? forcedIntent
       ? { intent: forcedIntent, confidence: 1, reason: 'Selected by the user.' }
-      : await classifySearchIntent(query)
+      : deterministicSpec?.kind === 'list' || deterministicSpec?.kind === 'mission'
+        ? {
+            intent: 'mission' as const,
+            confidence: deterministicSpec.confidence,
+            reason: 'The query names multiple products or a multi-item goal.',
+          }
+        : await classifySearchIntent(query)
     : { intent: 'product' as const, confidence: 1, reason: '' }
   const isMission = query.length > 0 && intentDecision.intent === 'mission'
 
@@ -108,36 +111,15 @@ export default async function SearchPage({
           </div>
         ) : (
           <div className="flex flex-col gap-10">
-            <Suspense fallback={<ClusteredProductsLoading />}>
-              <ClusteredProductsSection
+            <Suspense fallback={<AllResultsLoading />}>
+              <AllResultsView
                 query={query}
+                sort={sort}
                 adapters={activeAdapters}
                 timeoutMs={ADAPTER_TIMEOUT_MS}
+                view={view}
               />
             </Suspense>
-
-            {view === 'all' ? (
-              <Suspense fallback={<AllResultsLoading />}>
-                <AllResultsView
-                  query={query}
-                  sort={sort}
-                  adapters={activeAdapters}
-                  timeoutMs={ADAPTER_TIMEOUT_MS}
-                />
-              </Suspense>
-            ) : (
-              <div className="flex flex-col gap-12">
-                {activeAdapters.map((adapter) => (
-                  <Suspense key={adapter.id} fallback={<AdapterLoading adapter={adapter} />}>
-                    <AdapterSection
-                      adapter={adapter}
-                      query={query}
-                      timeoutMs={ADAPTER_TIMEOUT_MS}
-                    />
-                  </Suspense>
-                ))}
-              </div>
-            )}
           </div>
         )}
       </main>

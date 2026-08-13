@@ -1,225 +1,160 @@
-// One-shot script: wipe Product table, re-embed every Listing using normalized
-// titles, then re-cluster from scratch using the same logic as src/lib/cluster.ts.
+// One-shot repair for legacy Product clusters. It preserves one representative
+// listing (and therefore the existing Product id) per cluster, detaches unsafe
+// same-retailer or identity-incompatible members, then feeds only those rows
+// through the current conservative batch clusterer.
+//
 // Run with: npm run db:recluster
 
 import 'dotenv/config'
-import path from 'node:path'
-import { PrismaClient } from '@prisma/client'
-import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
-import { pipeline } from '@huggingface/transformers'
-import { normalizeTitle, extractASIN } from '../src/lib/text'
+import { clusterListingBatch, identityCompatible, updateProductAggregates } from '../src/lib/cluster'
+import { prisma } from '../src/lib/db'
+import { bytesToFloat, EMBEDDING_DIM, embedTexts, floatToBytes } from '../src/lib/embeddings'
+import { normalizeTitle } from '../src/lib/text'
 
-const MODEL_ID = 'Xenova/all-MiniLM-L6-v2'
-const EMBEDDING_DIM = 384
-const SIMILARITY_THRESHOLD = 0.82
-const PRICE_RATIO_LOW = 0.25
-const PRICE_RATIO_HIGH = 4.0
-
-function floatToBytes(arr: Float32Array): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(arr.byteLength)
-  out.set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength))
-  return out
+type ListingRow = {
+  id: string
+  retailerId: string
+  title: string
+  textEmbedding: Uint8Array | null
 }
 
-function bytesToFloat(bytes: Uint8Array | Buffer): Float32Array {
-  const copy = new Uint8Array(bytes.byteLength)
-  copy.set(bytes)
-  return new Float32Array(copy.buffer)
+function chooseKeeper(
+  canonicalTitle: string,
+  listings: ListingRow[],
+): ListingRow {
+  return (
+    listings.find((listing) => normalizeTitle(listing.title) === normalizeTitle(canonicalTitle)) ??
+    listings.find((listing) => identityCompatible(canonicalTitle, listing.title)) ??
+    listings[0]
+  )
 }
 
-function dot(a: Float32Array, b: Float32Array): number {
-  let s = 0
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i]
-  return s
-}
+async function ensureEmbeddings(listings: ListingRow[]): Promise<Map<string, Float32Array>> {
+  const vectors = new Map<string, Float32Array>()
+  const missing: ListingRow[] = []
+  for (const listing of listings) {
+    const vector = listing.textEmbedding ? bytesToFloat(listing.textEmbedding) : undefined
+    if (vector?.length === EMBEDDING_DIM) vectors.set(listing.id, vector)
+    else missing.push(listing)
+  }
 
-function centroid(embeds: Float32Array[]): Float32Array {
-  const sum = new Float32Array(EMBEDDING_DIM)
-  for (const e of embeds) for (let i = 0; i < EMBEDDING_DIM; i++) sum[i] += e[i]
-  let n = 0
-  for (let i = 0; i < EMBEDDING_DIM; i++) n += sum[i] * sum[i]
-  n = Math.sqrt(n) || 1
-  for (let i = 0; i < EMBEDDING_DIM; i++) sum[i] /= n
-  return sum
-}
-
-function median(values: number[]): number {
-  if (values.length === 0) return 0
-  const sorted = [...values].sort((a, b) => a - b)
-  const mid = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
-}
-
-function priceFits(price: number, clusterPrices: number[]): boolean {
-  if (price <= 0) return true
-  const valid = clusterPrices.filter((p) => p > 0)
-  if (valid.length === 0) return true
-  const m = median(valid)
-  if (m <= 0) return true
-  const r = price / m
-  return r >= PRICE_RATIO_LOW && r <= PRICE_RATIO_HIGH
+  const batchSize = 64
+  for (let offset = 0; offset < missing.length; offset += batchSize) {
+    const batch = missing.slice(offset, offset + batchSize)
+    const embedded = await embedTexts(batch.map((listing) => normalizeTitle(listing.title)))
+    for (let index = 0; index < batch.length; index += 1) {
+      const vector = embedded[index]
+      if (!(vector instanceof Float32Array) || vector.length !== EMBEDDING_DIM) continue
+      vectors.set(batch[index].id, vector)
+      await prisma.listing.update({
+        where: { id: batch[index].id },
+        data: { textEmbedding: floatToBytes(vector) },
+      })
+    }
+  }
+  return vectors
 }
 
 async function main() {
-  const dbPath = path.resolve(process.cwd(), 'prisma', 'dev.db')
-  const url = process.env.DATABASE_URL || `file:${dbPath}`
-  const adapter = new PrismaBetterSqlite3({ url })
-  const prisma = new PrismaClient({ adapter })
-
-  console.log('Loading embedding model (cached on disk after first run)…')
-  const extractor = await pipeline('feature-extraction', MODEL_ID)
-
-  console.log('Wiping existing Products + Listing embeddings…')
-  await prisma.product.deleteMany()
-  await prisma.listing.updateMany({
-    data: { productId: null, textEmbedding: null },
-  })
-
-  const listings = await prisma.listing.findMany({
-    orderBy: { capturedAt: 'asc' },
-    select: { id: true, title: true, url: true, imageUrl: true, priceMinor: true },
-  })
-  console.log(`Re-embedding + reclustering ${listings.length} listings…`)
-
-  let processed = 0
-  let asinAttached = 0
-  let cosineAttached = 0
-  let priceRejected = 0
-  let created = 0
-
-  for (const listing of listings) {
-    const normalized = normalizeTitle(listing.title)
-    if (!normalized) {
-      processed++
-      continue
-    }
-    const out = (await extractor(normalized, { pooling: 'mean', normalize: true })) as {
-      data: Float32Array
-    }
-    const embedding = out.data
-
-    await prisma.listing.update({
-      where: { id: listing.id },
-      data: { textEmbedding: floatToBytes(embedding) },
-    })
-
-    // Pass 1: ASIN exact match
-    const asin = extractASIN(listing.url)
-    let attached = false
-    if (asin) {
-      const sibling = await prisma.listing.findFirst({
-        where: {
-          id: { not: listing.id },
-          productId: { not: null },
-          url: { contains: asin },
-        },
-        select: { productId: true },
-      })
-      if (sibling?.productId) {
-        await prisma.listing.update({
-          where: { id: listing.id },
-          data: { productId: sibling.productId },
-        })
-        attached = true
-        asinAttached++
-      }
-    }
-
-    // Pass 2: cosine + price sanity
-    if (!attached) {
-      const products = await prisma.product.findMany({
+  const products = await prisma.product.findMany({
+    orderBy: { firstSeenAt: 'asc' },
+    select: {
+      id: true,
+      canonicalTitle: true,
+      listings: {
+        orderBy: { capturedAt: 'asc' },
         select: {
           id: true,
-          listings: { select: { textEmbedding: true, priceMinor: true } },
+          retailerId: true,
+          title: true,
+          textEmbedding: true,
         },
-      })
-
-      let best: { id: string; sim: number; prices: number[] } | null = null
-      for (const p of products) {
-        const embeds = p.listings
-          .map((l) => (l.textEmbedding ? bytesToFloat(l.textEmbedding) : null))
-          .filter((v): v is Float32Array => v !== null && v.length === EMBEDDING_DIM)
-        if (embeds.length === 0) continue
-        const c = centroid(embeds)
-        const sim = dot(embedding, c)
-        if (!best || sim > best.sim) {
-          best = { id: p.id, sim, prices: p.listings.map((l) => l.priceMinor) }
-        }
-      }
-
-      if (best && best.sim >= SIMILARITY_THRESHOLD) {
-        if (priceFits(listing.priceMinor, best.prices)) {
-          await prisma.listing.update({
-            where: { id: listing.id },
-            data: { productId: best.id },
-          })
-          attached = true
-          cosineAttached++
-        } else {
-          priceRejected++
-        }
-      }
-    }
-
-    if (!attached) {
-      const now = new Date()
-      const product = await prisma.product.create({
-        data: {
-          canonicalTitle: listing.title,
-          canonicalImage: listing.imageUrl,
-          firstSeenAt: now,
-          lastSeenAt: now,
-          listingCount: 0,
-          retailerCount: 0,
-        },
-      })
-      await prisma.listing.update({
-        where: { id: listing.id },
-        data: { productId: product.id },
-      })
-      created++
-    }
-
-    processed++
-    if (processed % 50 === 0) {
-      process.stdout.write(`  ${processed}/${listings.length}\n`)
-    }
-  }
-
-  // Recompute aggregates for all products
-  console.log('Recomputing Product aggregates…')
-  const allProducts = await prisma.product.findMany({ select: { id: true } })
-  for (const p of allProducts) {
-    const listings = await prisma.listing.findMany({
-      where: { productId: p.id },
-      select: { retailerId: true },
-    })
-    const retailerCount = new Set(listings.map((l) => l.retailerId)).size
-    await prisma.product.update({
-      where: { id: p.id },
-      data: {
-        listingCount: listings.length,
-        retailerCount,
-        lastSeenAt: new Date(),
       },
-    })
+    },
+  })
+
+  const detached: ListingRow[] = []
+  const touchedProducts = new Set<string>()
+  for (const product of products) {
+    if (product.listings.length <= 1) continue
+    const keeper = chooseKeeper(product.canonicalTitle, product.listings)
+    const seenRetailers = new Set([keeper.retailerId])
+    for (const listing of product.listings) {
+      if (listing.id === keeper.id) continue
+      if (
+        seenRetailers.has(listing.retailerId) ||
+        !identityCompatible(keeper.title, listing.title)
+      ) {
+        detached.push(listing)
+        touchedProducts.add(product.id)
+      } else {
+        seenRetailers.add(listing.retailerId)
+      }
+    }
   }
 
-  const total = await prisma.product.count()
-  const multi = await prisma.product.count({ where: { retailerCount: { gte: 2 } } })
-  const singletons = total - multi
+  if (detached.length === 0) {
+    console.log('All Product clusters already satisfy conservative identity rules.')
+    return
+  }
 
-  console.log('\n--- Recluster done ---')
-  console.log(`  ASIN-attached:   ${asinAttached}`)
-  console.log(`  Cosine-attached: ${cosineAttached}`)
-  console.log(`  Price-rejected:  ${priceRejected}`)
-  console.log(`  New products:    ${created}`)
-  console.log(`  Total products:  ${total} (${multi} multi-retailer, ${singletons} singleton)`)
+  console.log(`Detaching ${detached.length} unsafe offers from ${touchedProducts.size} clusters…`)
+  const chunkSize = 200
+  for (let offset = 0; offset < detached.length; offset += chunkSize) {
+    await prisma.listing.updateMany({
+      where: { id: { in: detached.slice(offset, offset + chunkSize).map((listing) => listing.id) } },
+      data: { productId: null },
+    })
+  }
+  for (const productId of touchedProducts) await updateProductAggregates(productId)
 
-  await prisma.$disconnect()
+  console.log('Ensuring detached offers have local embeddings…')
+  const vectors = await ensureEmbeddings(detached)
+  const byRetailer = new Map<string, ListingRow[]>()
+  for (const listing of detached) {
+    byRetailer.set(listing.retailerId, [
+      ...(byRetailer.get(listing.retailerId) ?? []),
+      listing,
+    ])
+  }
+
+  let reclustered = 0
+  for (const [retailerId, listings] of byRetailer) {
+    const entries = listings.flatMap((listing) => {
+      const embedding = vectors.get(listing.id)
+      return embedding ? [{ listingId: listing.id, embedding }] : []
+    })
+    reclustered += await clusterListingBatch(entries)
+    console.log(`  ${retailerId}: ${entries.length} offers`)
+  }
+
+  const orphaned = await prisma.listing.count({ where: { productId: null } })
+  const remainingSameRetailerClusters = await prisma.$queryRaw<
+    Array<{ count: bigint }>
+  >`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT l.productId, l.retailerId
+      FROM Listing l
+      WHERE l.productId IS NOT NULL
+      GROUP BY l.productId, l.retailerId
+      HAVING COUNT(*) > 1
+    )
+  `
+
+  console.log('\n--- Conservative recluster complete ---')
+  console.log(`  Reclustered offers: ${reclustered}`)
+  console.log(`  Orphaned listings:  ${orphaned}`)
+  console.log(
+    `  Duplicate retailer/product groups: ${Number(remainingSameRetailerClusters[0]?.count ?? 0n)}`,
+  )
 }
 
-main().catch((err) => {
-  console.error(err)
-  process.exit(1)
-})
+main()
+  .catch((error: unknown) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+  .finally(async () => {
+    await prisma.$disconnect()
+  })

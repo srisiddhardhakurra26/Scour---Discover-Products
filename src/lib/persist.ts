@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db'
 import type { NormalizedListing } from './adapters/types'
 import { embedTexts, floatToBytes } from './embeddings'
-import { clusterListing } from './cluster'
+import { clusterListingBatch } from './cluster'
 import { enqueueEnrichment } from './enrich'
 import { normalizeTitle } from './text'
 
@@ -13,6 +13,11 @@ export type PersistResult = {
 }
 
 const RAW_MAX_CHARS = 50_000
+const MAX_CLUSTER_TARGETS_PER_BATCH = 24
+
+const globalForPersistence = globalThis as unknown as {
+  __scourPersistenceQueue?: Promise<void>
+}
 
 function serializeRaw(raw: unknown): string | undefined {
   if (raw === undefined || raw === null) return undefined
@@ -28,7 +33,7 @@ function serializeRaw(raw: unknown): string | undefined {
   }
 }
 
-export async function persistListings(
+async function persistListingsNow(
   retailerId: string,
   listings: NormalizedListing[],
   precomputedEmbeddings?: Float32Array[],
@@ -127,13 +132,16 @@ export async function persistListings(
           data: { textEmbedding: floatToBytes(vec) },
         })
         embedded++
-        try {
-          await clusterListing(listingId, vec)
-          clustered++
-        } catch (err) {
-          console.error(`[cluster] listing=${listingId}:`, err)
-        }
       }
+      clustered = await clusterListingBatch(
+        targets
+          .map(({ listingId }, index) => ({ listingId, embedding: vectors[index] }))
+          .filter(
+            (entry): entry is { listingId: string; embedding: Float32Array } =>
+              entry.embedding instanceof Float32Array,
+          )
+          .slice(0, MAX_CLUSTER_TARGETS_PER_BATCH),
+      )
     } catch (err) {
       console.error('[embed]', err)
     }
@@ -144,6 +152,28 @@ export async function persistListings(
   enqueueEnrichment(batchIds)
 
   return { upserts, priceObservations, embedded, clustered }
+}
+
+/**
+ * Serialize background catalogue writes across adapters. better-sqlite3 is a
+ * single-writer store; allowing every adapter to embed and cluster in parallel
+ * caused the interrupted implementation's post-response work to stall later
+ * searches even though it had been moved behind `after()`.
+ */
+export function persistListings(
+  retailerId: string,
+  listings: NormalizedListing[],
+  precomputedEmbeddings?: Float32Array[],
+): Promise<PersistResult> {
+  const previous = globalForPersistence.__scourPersistenceQueue ?? Promise.resolve()
+  const task = previous.then(() =>
+    persistListingsNow(retailerId, listings, precomputedEmbeddings),
+  )
+  globalForPersistence.__scourPersistenceQueue = task.then(
+    () => undefined,
+    () => undefined,
+  )
+  return task
 }
 
 async function markFetched(retailerId: string) {

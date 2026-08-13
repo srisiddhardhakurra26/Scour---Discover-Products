@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { getAdapters, ADAPTER_TIMEOUT_MS } from '@/lib/adapters/registry'
-import { searchAllAdapters } from '@/lib/fanout'
 import { formatPrice } from '@/lib/format'
 import { lookupProduct, lookupHeadline } from '@/lib/lookup'
 import { runMission } from '@/lib/mission'
 import { prisma } from '@/lib/db'
+import { searchProducts } from '@/lib/search-engine'
 
 const NON_SHOP_TYPES = new Set(['reddit', 'rss', 'mock'])
 
@@ -52,9 +52,12 @@ export function buildScourMcpServer(baseUrl: string): McpServer {
     async ({ query, max_results }) => {
       const limit = max_results ?? 10
       const adapters = (await getAdapters()).filter((a) => !NON_SHOP_TYPES.has(a.type))
-      const results = await searchAllAdapters(adapters, query, ADAPTER_TIMEOUT_MS)
-
-      let storesHit = 0
+      const search = await searchProducts({
+        query,
+        adapters,
+        timeoutMs: ADAPTER_TIMEOUT_MS,
+        maxResults: limit,
+      })
       const listings: {
         title: string
         price: string
@@ -65,35 +68,42 @@ export function buildScourMcpServer(baseUrl: string): McpServer {
         imageUrl?: string
         relevance: number
         cached: boolean
+        role: string
+        why: string[]
+        matchingOffers: number
       }[] = []
-      for (const r of results) {
-        if (r.failed || r.kept.length === 0) continue
-        storesHit++
-        for (const item of r.kept.slice(0, 5)) {
-          const l = item.listing
-          if (!l.priceMinor || l.priceMinor <= 0) continue
-          listings.push({
-            title: l.title,
-            price: formatPrice(l.priceMinor, l.currency || 'USD'),
-            priceMinor: l.priceMinor,
-            currency: l.currency || 'USD',
-            store: r.adapter.label,
-            url: l.url,
-            imageUrl: l.imageUrl,
-            relevance: Number(item.score.toFixed(3)),
-            cached: r.fromCache,
-          })
-        }
+      for (const product of search.products) {
+        const item = product.candidate
+        const listing = item.listing
+        if (!listing.priceMinor || listing.priceMinor <= 0) continue
+        listings.push({
+          title: listing.title,
+          price: formatPrice(listing.priceMinor, listing.currency || 'USD'),
+          priceMinor: listing.priceMinor,
+          currency: listing.currency || 'USD',
+          store: item.adapter.label,
+          url: listing.url,
+          imageUrl: listing.imageUrl,
+          relevance: Number(product.score.baseRelevance.toFixed(3)),
+          cached: item.fromCache,
+          role: item.role,
+          why: item.roleDecision.reasons,
+          matchingOffers: product.offers.length,
+        })
       }
-      listings.sort((a, b) => {
-        if (Math.abs(b.relevance - a.relevance) > 0.04) return b.relevance - a.relevance
-        return a.priceMinor - b.priceMinor
-      })
 
       return json({
         query,
-        storesSearched: adapters.length,
-        storesHit,
+        interpretation: {
+          kind: search.spec.kind,
+          productType: search.spec.productType,
+          brand: search.spec.brand,
+          model: search.spec.model,
+          required: search.spec.must,
+          excluded: search.spec.mustNot,
+        },
+        storesSearched: search.storesSearched,
+        storesHit: search.storesHit,
         results: listings.slice(0, limit),
         scourUrl: `${base}/search?q=${encodeURIComponent(query)}`,
       })

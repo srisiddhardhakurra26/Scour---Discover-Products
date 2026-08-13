@@ -82,16 +82,19 @@ None are required to boot — adapters and features degrade gracefully when a ke
 | `GROQ_API_KEY` / `GEMINI_API_KEY`          | LLM layer: query parsing, source onboarding/repair, cluster judging, copilot chat (Groq first, Gemini fallback) |
 | `WATCHDOG_DISABLED` / `WATCHDOG_INTERVAL_MS` | Disable with `1`/`true`; tune the daily source-health watchdog in milliseconds |
 | `ENRICH_DISABLED` / `ENRICH_OCR_DISABLED`  | Disable background image-hash / OCR enrichment with `1`/`true`     |
+| `LOCAL_RERANKER_DISABLED`                  | Disable the local ONNX query-product cross-encoder when set to `1` |
+| `SEARCH_TELEMETRY_HASH_KEY`                | HMAC key for privacy-minimal query aggregation in production       |
 | `DATABASE_URL`                             | Override the SQLite location (defaults to a local file)           |
 | `MCP_API_KEY`                              | Bearer-token auth on `/api/mcp` (open when unset)                 |
 
 ## How it works
 
 1. **Fan-out.** A query hits all enabled adapters in parallel with a per-adapter timeout, so one slow/dead source never blocks the rest.
-2. **Embed + cluster.** Each listing title becomes a local 384-dim embedding (`@huggingface/transformers`, no external API). Listings join a `Product` via exact ID match, cosine similarity, or a perceptual image-hash match; ambiguous cases get an LLM "same product?" verdict.
-3. **LLM agent layer.** Groq/Gemini-backed helpers parse queries into structured filters, onboard new storefront domains by deriving scrapers (HTML/JSON-LD/vision as a last resort), and repair sources automatically when they go stale.
-4. **Background enrichment.** Off the search path, listings get an image hash and OCR'd spec text to strengthen future clustering.
-5. **Source watchdog.** A daily job probes every source with canary queries and auto-repairs broken selectors; history shows up as the health dots on `/sources`.
+2. **Retrieve + rerank.** Native store results, catalogue BM25, and local semantic retrieval are fused, hard-gated by a structured search spec, reranked by a local query-product cross-encoder, grouped conservatively, then diversified.
+3. **Background identity.** Listings are embedded and clustered off the response path via exact IDs, conservative model identity, cosine similarity, and perceptual image hashes; ambiguous pairs can use an LLM verdict.
+4. **LLM agent layer.** Groq/Gemini-backed helpers handle ambiguous query planning, source onboarding/repair, and copilot chat. Product relevance remains functional without a hosted LLM.
+5. **Background enrichment.** Off the search path, listings get an image hash and OCR'd spec text to strengthen future clustering.
+6. **Source watchdog.** A daily job probes every source with canary queries and auto-repairs broken selectors; history shows up as the health dots on `/sources`.
 
 See [CLAUDE.md](CLAUDE.md) for the full technical deep-dive (data model, matching thresholds, hard constraints).
 

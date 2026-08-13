@@ -18,6 +18,13 @@ import {
   dedupeListings,
 } from '@/lib/result-quality'
 import { withHardTimeout } from '@/lib/timeout'
+import {
+  recordSourceFailure,
+  recordSourceSuccess,
+  sourceCanAttempt,
+} from '@/lib/source-reliability'
+import { buildSearchSpec } from '@/lib/search-spec'
+import { buildQueryVariants } from '@/lib/search-retrieval'
 
 // When a live fetch fails (timeout, bot-block), serve the retailer's
 // recently-persisted listings instead of dropping it from the page — the
@@ -27,6 +34,15 @@ import { withHardTimeout } from '@/lib/timeout'
 // next successful fetch refreshes everything.
 const FALLBACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const FALLBACK_MAX_ROWS = 80
+
+function scheduleAfter(task: () => void | Promise<void>): void {
+  try {
+    after(task)
+  } catch {
+    // MCP/CLI callers can execute this module without a Next request context.
+    void task()
+  }
+}
 
 export type AdapterSearchResult = {
   adapter: Adapter
@@ -99,10 +115,13 @@ async function run(
   const started = performance.now()
   const parsed = parsedQuery ?? (await parseQuery(query))
   try {
+    if (!sourceCanAttempt(adapter.id)) {
+      throw new Error('source circuit open after repeated failures')
+    }
     const searchQuery = parsed.refinedQuery || query
     // Hard ceiling on top of the AbortSignal: some adapters don't honor abort
     // and would otherwise hang every section awaiting this promise.
-    const raw = dedupeListings(
+    let raw = dedupeListings(
       await withHardTimeout(
         adapter.search(searchQuery, AbortSignal.timeout(timeoutMs)),
         timeoutMs + 1500,
@@ -115,18 +134,25 @@ async function run(
     // see the same gated set.
     ranked.kept = materialGate(query, parsed, ranked.kept)
 
-    // Agentic re-query: a store that kept nothing gets one retry with a
-    // query reformulated in its own vocabulary ("leather shoes" → "chelsea
-    // boot" at a boot brand). Results are still ranked against the user's
-    // original query, so intent can't drift. LLM-down or no suggestion →
-    // we simply keep the empty first pass.
+    // Low-recall expansion keeps the literal lane and adds one controlled
+    // category/model variant. An LLM store-specific rewrite is only a final
+    // fallback when the literal search found nothing and no deterministic
+    // variant exists. Everything is reranked against the original query.
     if (
-      ranked.kept.length === 0 &&
+      (ranked.kept.length < 3 || (ranked.kept[0]?.score ?? 0) < 0.32) &&
       allowRequery &&
       adapter.type !== 'mock' &&
       adapter.type !== 'shopify'
     ) {
-      const alt = await reformulateForStore(query, adapter.label, adapter.type)
+      const variants = buildQueryVariants(buildSearchSpec(query))
+      const deterministicAlt = variants.find(
+        (variant) => variant !== searchQuery.toLowerCase() && variant !== query.toLowerCase(),
+      )
+      const alt = deterministicAlt ?? (
+        ranked.kept.length === 0
+          ? await reformulateForStore(query, adapter.label, adapter.type)
+          : null
+      )
       if (alt && alt !== searchQuery.toLowerCase()) {
         try {
           const altRaw = dedupeListings(
@@ -136,18 +162,23 @@ async function run(
               `${adapter.label} re-query`,
             ),
           )
+          const mergedRaw = dedupeListings([...raw, ...altRaw])
           const altRanked = await rankByRelevance(
             query,
-            altRaw,
+            mergedRaw,
             parsed,
             recallModeForType(adapter.type),
           )
           altRanked.kept = materialGate(query, parsed, altRanked.kept)
-          if (altRanked.kept.length > 0) {
+          if (
+            altRanked.kept.length > ranked.kept.length ||
+            (altRanked.kept[0]?.score ?? 0) > (ranked.kept[0]?.score ?? 0)
+          ) {
             console.log(
-              `[requery] ${adapter.label}: "${alt}" rescued ${altRanked.kept.length} listings`,
+              `[expansion] ${adapter.label}: "${alt}" produced ${altRanked.kept.length} candidates`,
             )
             ranked = altRanked
+            raw = mergedRaw
           }
         } catch (err) {
           console.warn(
@@ -157,31 +188,40 @@ async function run(
         }
       }
     }
-    // Persist before resolving (not via after()) so ClusteredProductsSection,
-    // which awaits this same promise, sees the writes and the clusters built
-    // from them.
+    // Persistence, enrichment, and entity maintenance are valuable but not
+    // part of retrieval. Keep them off the response path: the live candidates
+    // are already in memory and the next request can use the refreshed catalog.
     if (persist) {
-      try {
-        await persistListings(
-          adapter.id,
-          ranked.kept.map((r) => r.listing),
-          ranked.kept.map((r) => r.embedding),
-        )
-      } catch (err) {
-        console.error(`[persist] ${adapter.label}:`, err)
+      const persistInBackground = async () => {
+        try {
+          await persistListings(
+            adapter.id,
+            ranked.kept.map((r) => r.listing),
+            ranked.kept.map((r) => r.embedding),
+          )
+        } catch (err) {
+          console.error(`[persist] ${adapter.label}:`, err)
+        }
       }
+      scheduleAfter(persistInBackground)
     }
+    const elapsedMs = Math.round(performance.now() - started)
+    recordSourceSuccess(adapter.id, elapsedMs)
     return {
       adapter,
       kept: ranked.kept,
       rawCount: raw.length,
-      elapsedMs: Math.round(performance.now() - started),
+      elapsedMs,
       failed: false,
       fromCache: false,
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error'
-    after(() => recordAdapterError(adapter.id, message).catch(() => {}))
+    const elapsedMs = Math.round(performance.now() - started)
+    if (!message.includes('circuit open')) {
+      recordSourceFailure(adapter.id, elapsedMs)
+    }
+    scheduleAfter(() => recordAdapterError(adapter.id, message).catch(() => {}))
     // warn, not error: adapter failures are routine (bot-blocks, timeouts) and
     // already recorded to the retailer row for /sources. console.error here
     // makes the Next dev overlay flash errors on every search.
@@ -211,7 +251,7 @@ async function run(
             adapter,
             kept: ranked.kept,
             rawCount: cached.length,
-            elapsedMs: Math.round(performance.now() - started),
+            elapsedMs,
             failed: false,
             fromCache: true,
           }
@@ -225,7 +265,7 @@ async function run(
       adapter,
       kept: [],
       rawCount: 0,
-      elapsedMs: Math.round(performance.now() - started),
+      elapsedMs,
       failed: true,
       fromCache: false,
     }
